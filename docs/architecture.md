@@ -44,6 +44,7 @@ No VNC, session recording, multitenancy, monitoring, patching, alerting or billi
 ## Known limitations
 
 - No real remote sessions or file operations yet; capability names are descriptive.
+- `current_user` reports the agent process account where available, not a detected interactive desktop session.
 - No credential management API or UI yet. The encrypted model and service functions are in place.
 - No internal device certificate authority yet. Ed25519 challenge/response can later be replaced by short-lived device certificates, keeping the same public identity and enrollment boundary.
 - Presence is held by one broker process. Scaling to multiple replicas needs shared coordination and routing; run one broker for now.

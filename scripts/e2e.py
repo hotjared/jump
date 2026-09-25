@@ -102,11 +102,16 @@ def main():
             token = dc("exec", "-T", "jump", "python", "-c", script).strip()
             binary = temp / "jump-agent"
             subprocess.run(
+                ["go", "mod", "tidy"],
+                cwd=ROOT / "agent",
+                env=env,
+                check=True,
+            )
+            subprocess.run(
                 ["go", "build", "-o", str(binary), "."],
                 cwd=ROOT / "agent",
                 env=env,
                 check=True,
-                capture_output=True,
             )
             agent_env = env | {"JUMP_AGENT_STATE": str(temp / "identity.json")}
             run(

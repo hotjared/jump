@@ -273,6 +273,7 @@ func randomID() string {
 }
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	token := os.Getenv("BROKER_INTERNAL_TOKEN")
 	if len(token) < 32 {
 		slog.Error("BROKER_INTERNAL_TOKEN is missing")

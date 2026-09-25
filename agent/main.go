@@ -95,6 +95,10 @@ func info() metadata {
 				}
 			}
 		}
+	} else if runtime.GOOS == "windows" {
+		if output, err := exec.Command("cmd", "/c", "ver").Output(); err == nil {
+			osVersion = strings.TrimSpace(string(output))
+		}
 	}
 	return metadata{host, runtime.GOOS, osVersion, runtime.GOARCH, version, caps, addresses, username}
 }
@@ -298,6 +302,7 @@ func run(ctx context.Context) error {
 }
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: jump-agent enroll --server URL --token TOKEN | run")
 		os.Exit(2)

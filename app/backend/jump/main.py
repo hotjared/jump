@@ -1,7 +1,9 @@
 import base64
 import hmac
+import json
 import logging
 import secrets
+import time
 import uuid
 from pathlib import Path
 
@@ -21,7 +23,7 @@ from .schemas import DevicePatch, EnrollmentInput, EnrollRequest, Metadata, Name
 from .security import consume_enrollment, create_enrollment, map_oidc_user, require_admin
 
 log = logging.getLogger("jump")
-logging.basicConfig(level=logging.INFO, format='{"level":"%(levelname)s","message":"%(message)s"}')
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 cfg = settings()
 cfg.validate_production()
 app = FastAPI(title="Jump", docs_url=None, redoc_url=None)
@@ -38,17 +40,20 @@ oauth.register(
 @app.middleware("http")
 async def request_guard(request: Request, call_next):
     request.state.request_id = str(uuid.uuid4())
+    started = time.perf_counter()
+    response = None
     if request.url.path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS"):
         # Browser session writes require a same-origin request plus a double-submit CSRF header.
         if not request.url.path.startswith("/api/internal/"):
             origin = request.headers.get("origin")
             if origin != cfg.public_url.rstrip("/"):
-                return Response("Invalid Origin", status_code=403)
-            csrf = request.headers.get("x-csrf-token", "")
-            expected = request.session.get("csrf") if "session" in request.scope else None
-            if not expected or not hmac.compare_digest(csrf, expected):
-                return Response("Invalid CSRF token", status_code=403)
-    response = await call_next(request)
+                response = Response("Invalid Origin", status_code=403)
+            elif not (expected := request.session.get("csrf")) or not hmac.compare_digest(
+                request.headers.get("x-csrf-token", ""), expected
+            ):
+                response = Response("Invalid CSRF token", status_code=403)
+    if response is None:
+        response = await call_next(request)
     response.headers["X-Request-ID"] = request.state.request_id
     response.headers["Cache-Control"] = (
         "no-store" if request.url.path.startswith("/api/") else "public"
@@ -56,6 +61,19 @@ async def request_guard(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    )
+    log.info(
+        json.dumps(
+            {
+                "event": "http_request",
+                "request_id": request.state.request_id,
+                "user_id": request.session.get("uid"),
+                "method": request.method,
+                "path": request.url.path,
+                "status": response.status_code,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+        )
     )
     return response
 

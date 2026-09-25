@@ -1,7 +1,7 @@
 FROM node:22-alpine AS frontend
 WORKDIR /src
 COPY app/frontend/package*.json ./
-RUN npm install
+RUN npm ci
 COPY app/frontend/ ./
 RUN npm run build
 
@@ -16,4 +16,4 @@ COPY --from=frontend /src/dist ./static
 RUN pip install --no-cache-dir . && useradd -r -u 10001 jump
 USER jump
 EXPOSE 8000
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn jump.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"]
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn jump.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*' --no-access-log"]
