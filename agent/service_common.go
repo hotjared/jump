@@ -105,7 +105,7 @@ func linuxSystemdUnit() string {
 }
 
 func windowsInstallCommands(executable string) [][]string {
-	binPath := fmt.Sprintf("%q service run", executable)
+	binPath := fmt.Sprintf("%q run", executable)
 	return [][]string{
 		{"create", windowsServiceName, "binPath=", binPath, "start=", "auto", "obj=", "LocalSystem", "DisplayName=", windowsServiceDisplayName},
 		{"failure", windowsServiceName, "reset=", "86400", "actions=", "restart/5000/restart/5000/restart/5000"},
