@@ -7,6 +7,8 @@ import time
 import uuid
 from pathlib import Path
 
+import httpx
+
 from authlib.integrations.starlette_client import OAuth
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
@@ -129,6 +131,10 @@ def serialize_device(device: Device) -> dict:
         "group": {"id": str(device.group.id), "name": device.group.name} if device.group else None,
         "tags": [{"id": str(tag.id), "name": tag.name} for tag in device.tags],
         "online": device.online,
+        "identity_state": (
+            "revoked" if device.agent_identity and device.agent_identity.revoked_at
+            else "active" if device.agent_identity else "none"
+        ),
         "last_seen_at": device.last_seen_at,
         "enrolled_at": device.enrolled_at,
     }
@@ -213,6 +219,58 @@ def patch_device(
         )
     )
     db.commit()
+    return serialize_device(item)
+
+
+def disconnect_revoked_agent(device_id: uuid.UUID) -> None:
+    try:
+        with httpx.Client(timeout=5) as client:
+            response = client.post(
+                f"{cfg.broker_internal_url.rstrip('/')}/internal/devices/{device_id}/disconnect",
+                headers={"Authorization": f"Bearer {cfg.broker_internal_token}"},
+            )
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        log.warning(json.dumps({"event": "revocation_disconnect_failed", "device_id": str(device_id)}))
+        raise HTTPException(
+            503, "Identity revoked, but the active broker disconnect could not be confirmed"
+        ) from exc
+
+
+@app.post("/api/devices/{device_id}/revoke")
+def revoke_device(
+    device_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(admin),
+    db: Session = Depends(get_db),
+):
+    # Lock in the same order as /connected, so a concurrent reconnect cannot
+    # become active after the revocation transaction has committed.
+    item = db.scalar(select(Device).where(Device.id == device_id).with_for_update())
+    if not item:
+        raise HTTPException(404)
+    identity = db.scalar(
+        select(AgentIdentity).where(AgentIdentity.device_id == device_id).with_for_update()
+    )
+    if not identity:
+        raise HTTPException(404, "Device has no agent identity")
+    if identity.revoked_at is None:
+        identity.revoked_at = now()
+        item.online = False
+        item.connection_id = None
+        db.add(
+            AuditEvent(
+                event_type="agent_identity_revoked",
+                actor_user_id=user.id,
+                device_id=item.id,
+                request_id=request.state.request_id,
+            )
+        )
+        db.commit()
+    # Retry the broker disconnect on repeated requests if an earlier attempt
+    # committed revocation but could not reach the broker.
+    disconnect_revoked_agent(device_id)
+    db.refresh(item)
     return serialize_device(item)
 
 
@@ -417,9 +475,16 @@ def apply_metadata(device: Device, data: Metadata) -> None:
 
 @app.post("/api/internal/devices/{device_id}/connected", dependencies=[Depends(internal)])
 def connected(device_id: uuid.UUID, body: PresenceInput, db: Session = Depends(get_db)):
-    device = db.get(Device, device_id)
+    device = db.scalar(select(Device).where(Device.id == device_id).with_for_update())
     if not device:
         raise HTTPException(404)
+    identity = db.scalar(
+        select(AgentIdentity).where(
+            AgentIdentity.device_id == device_id, AgentIdentity.revoked_at.is_(None)
+        ).with_for_update()
+    )
+    if not identity:
+        raise HTTPException(403, "Agent identity revoked")
     if body.metadata:
         apply_metadata(device, body.metadata)
     device.online, device.last_seen_at, device.connection_id = True, now(), body.connection_id
@@ -436,6 +501,9 @@ def heartbeat(device_id: uuid.UUID, body: PresenceInput, db: Session = Depends(g
             Device.id == device_id,
             Device.connection_id == body.connection_id,
             Device.online.is_(True),
+            Device.id.in_(
+                select(AgentIdentity.device_id).where(AgentIdentity.revoked_at.is_(None))
+            ),
         )
         .values(last_seen_at=now())
     )
