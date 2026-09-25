@@ -172,7 +172,7 @@ def test_revoke_identity_disconnects_and_prevents_reconnect(client, db, monkeypa
     assert client.post(url + "/heartbeat", json=presence, headers=BROKER).status_code == 409
     assert db.get(Device, uuid.UUID(device_id)) is not None
     assert client.get(admin_url).json()["identity_state"] == "revoked"
-    assert client.post(url + "/revoke", headers=write_headers()).status_code == 200
+    assert client.post(admin_url + "/revoke", headers=write_headers()).status_code == 200
     assert disconnected == [uuid.UUID(device_id), uuid.UUID(device_id)]
     events = db.scalars(
         select(AuditEvent).where(AuditEvent.event_type == "agent_identity_revoked")
