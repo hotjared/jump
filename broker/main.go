@@ -290,13 +290,25 @@ func main() {
 		slog.Error("JUMP_INTERNAL_URL is missing")
 		os.Exit(1)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	err := b.call(ctx, "POST", "/api/internal/reconcile", nil, nil)
-	cancel()
-	if err != nil {
-		slog.Error("startup reconciliation failed", "error", err)
-		os.Exit(1)
+	// A simultaneous Compose restart can start the broker before the API is accepting
+	// connections. Reconcile before accepting agents, with a bounded startup wait.
+	startupCtx, startupCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	var err error
+	for {
+		attemptCtx, attemptCancel := context.WithTimeout(startupCtx, 5*time.Second)
+		err = b.call(attemptCtx, "POST", "/api/internal/reconcile", nil, nil)
+		attemptCancel()
+		if err == nil {
+			break
+		}
+		select {
+		case <-startupCtx.Done():
+			slog.Error("startup reconciliation failed", "error", err)
+			os.Exit(1)
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
+	startupCancel()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("/enroll", b.enroll)
@@ -312,7 +324,7 @@ func main() {
 	}()
 	slog.Info("broker ready")
 	<-shutdown.Done()
-	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	server.Shutdown(ctx)
 	b.mu.Lock()
