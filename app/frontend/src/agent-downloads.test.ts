@@ -20,10 +20,10 @@ describe('native agent enrollment', () => {
   })
   it('renders runnable commands using the published filenames', () => {
     expect(enrollmentCommand('linux', 'https://agent.example.com', 'one-use-secret')).toBe(
-      'chmod +x jump-agent-linux-amd64\nsudo ./jump-agent-linux-amd64 enroll --server https://agent.example.com --token one-use-secret\nsudo ./jump-agent-linux-amd64 run',
+      'chmod +x jump-agent-linux-amd64\nsudo ./jump-agent-linux-amd64 enroll --server https://agent.example.com --token one-use-secret\nsudo ./jump-agent-linux-amd64 service install',
     )
     expect(enrollmentCommand('windows', 'https://agent.example.com', 'one-use-secret')).toBe(
-      '.\\jump-agent-windows-amd64.exe enroll --server https://agent.example.com --token one-use-secret\n.\\jump-agent-windows-amd64.exe run',
+      '.\\jump-agent-windows-amd64.exe enroll --server https://agent.example.com --token one-use-secret\n.\\jump-agent-windows-amd64.exe service install',
     )
   })
 })
