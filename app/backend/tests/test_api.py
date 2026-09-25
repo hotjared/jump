@@ -7,7 +7,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from jump.db import get_db
 from jump.main import app
@@ -20,6 +20,7 @@ from jump.models import (
     Role,
     Tag,
     User,
+    device_tags,
     now,
 )
 
@@ -251,7 +252,9 @@ def test_device_delete_permissions_and_preconditions(client, db):
     db.commit()
     url = f"/api/devices/{device.id}"
 
-    assert client.delete(url, headers=write_headers()).status_code == 401
+    # The write guard rejects a request without a valid browser CSRF session
+    # before the route dependency can return Login required.
+    assert client.delete(url, headers=write_headers()).status_code == 403
 
     user = as_user(client, db, Role.USER)
     assert client.delete(url, headers=write_headers()).status_code == 403
@@ -307,7 +310,8 @@ def test_revoked_offline_device_delete_cascades_owned_data_and_preserves_shared_
         ciphertext=b"ciphertext",
         nonce=b"nonce",
     )
-    db.add_all([identity, credential])
+    unrelated_audit = AuditEvent(event_type="unrelated_event", actor_user_id=user.id)
+    db.add_all([identity, credential, unrelated_audit])
     db.commit()
 
     device_id = device.id
@@ -322,6 +326,10 @@ def test_revoked_offline_device_delete_cascades_owned_data_and_preserves_shared_
     assert db.scalar(select(Credential).where(Credential.device_id == device_id)) is None
     assert db.get(Group, group.id) is not None
     assert db.get(Tag, tag.id) is not None
+    assert db.scalar(
+        select(func.count()).select_from(device_tags).where(device_tags.c.device_id == device_id)
+    ) == 0
+    assert db.get(AuditEvent, unrelated_audit.id) is not None
 
     event = db.scalar(select(AuditEvent).where(AuditEvent.event_type == "device_deleted"))
     assert event is not None
