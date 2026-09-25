@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jump
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: jump
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jump -d jump"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [internal]
+
+  jump:
+    build:
+      context: .
+      dockerfile: app/backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://jump:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/jump
+      OIDC_ISSUER: ${OIDC_ISSUER:?Set OIDC_ISSUER}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?Set OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?Set OIDC_CLIENT_SECRET}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:?Set OIDC_REDIRECT_URI}
+      PUBLIC_URL: ${PUBLIC_URL:?Set PUBLIC_URL}
+      AGENT_URL: ${AGENT_URL:?Set AGENT_URL}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET}
+      BROKER_INTERNAL_TOKEN: ${BROKER_INTERNAL_TOKEN:?Set BROKER_INTERNAL_TOKEN}
+      JUMP_MASTER_KEY: ${JUMP_MASTER_KEY:?Set JUMP_MASTER_KEY}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:?Set ALLOWED_HOSTS}
+    ports:
+      - "${JUMP_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    networks: [internal]
+
+  broker:
+    build: ./broker
+    restart: unless-stopped
+    environment:
+      JUMP_INTERNAL_URL: http://jump:8000
+      BROKER_INTERNAL_TOKEN: ${BROKER_INTERNAL_TOKEN:?Set BROKER_INTERNAL_TOKEN}
+    ports:
+      - "${JUMP_BIND_ADDRESS:-127.0.0.1}:8080:8080"
+    depends_on:
+      jump:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks: [internal]
+
+  guacd:
+    image: guacamole/guacd:1.6.0
+    restart: unless-stopped
+    networks: [internal]
+
+volumes:
+  postgres_data:
+
+networks:
+  internal:
