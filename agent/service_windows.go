@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -148,4 +149,16 @@ func runWindowsService() error {
 		return fmt.Errorf("start Windows service dispatcher: %w", callErr)
 	}
 	return nil
+}
+
+
+func runAgentCommand() error {
+	err := runWindowsService()
+	if errno, ok := err.(syscall.Errno); ok && errno == syscall.Errno(1063) {
+		return runForeground()
+	}
+	if err != nil && strings.Contains(err.Error(), "1063") {
+		return runForeground()
+	}
+	return err
 }
