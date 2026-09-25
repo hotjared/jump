@@ -66,6 +66,23 @@ def test_permissions_and_csrf(client, db):
     assert client.get("/api/audit").status_code == 403
 
 
+def test_agent_downloads_are_admin_only_and_have_no_enrollment_token(client, db, monkeypatch):
+    assert client.get("/api/agent-downloads").status_code == 401
+    user = as_user(client, db, Role.USER)
+    assert client.get("/api/agent-downloads").status_code == 403
+    user.role = Role.ADMIN
+    db.commit()
+    monkeypatch.setattr("jump.main.cfg.jump_server_version", "v1.2.3")
+    response = client.get("/api/agent-downloads")
+    assert response.status_code == 200
+    links = response.json()
+    assert links["version"] == "v1.2.3"
+    assert links["downloads"]["linux"].endswith("/jump-agent-linux-amd64")
+    assert links["downloads"]["windows"].endswith("/jump-agent-windows-amd64.exe")
+    assert links["checksums"].endswith("/SHA256SUMS")
+    assert "token" not in response.text
+
+
 def test_enrollment_presence_reconnect_and_audit(client, db):
     as_user(client, db)
     no_csrf = client.post("/api/enrollment-tokens", json={"os_family": "linux"})

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { agentFilename, downloadFor, enrollmentCommand, type AgentDownloads, type Platform } from './agent-downloads'
 
 type Named = { id: string; name: string }
 type Device = {
@@ -46,8 +47,9 @@ export default function App() {
   const [group, setGroup] = useState('all')
   const [tag, setTag] = useState('all')
   const [enrolling, setEnrolling] = useState(false)
-  const [platform, setPlatform] = useState('linux')
+  const [platform, setPlatform] = useState<Platform>('linux')
   const [issued, setIssued] = useState<{ token: string; expires_at: string; agent_url: string } | null>(null)
+  const [agentRelease, setAgentRelease] = useState<AgentDownloads | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [newGroup, setNewGroup] = useState('')
@@ -73,6 +75,10 @@ export default function App() {
     const timer = setInterval(() => { refresh(user.role === 'admin').catch(() => {}) }, 15000)
     return () => clearInterval(timer)
   }, [user])
+  useEffect(() => {
+    if (!enrolling || user?.role !== 'admin') return
+    get<AgentDownloads>('/api/agent-downloads').then(setAgentRelease).catch(() => setError('Could not load agent downloads.'))
+  }, [enrolling, user])
   const visible = useMemo(() => filterDevices(devices, query, status, os, group, tag),
     [devices, query, status, os, group, tag])
   const device = devices.find(d => d.id === selected)
@@ -173,9 +179,14 @@ export default function App() {
       </div> : <div className="placeholder compact"><span>◇</span><h2>{tab} is not available yet</h2><p>Connection and action features arrive in a later phase.</p></div>}
     </aside></div>}
     {enrolling && <div className="overlay" onClick={() => setEnrolling(false)}><div className="modal" onClick={e => e.stopPropagation()}><button className="close" aria-label="Close" onClick={() => setEnrolling(false)}>×</button><p className="eyebrow">NEW ENDPOINT</p><h2>Enroll a device</h2>
-      {!issued ? <><p>Choose the operating system, then generate a single-use token.</p><div className="platform">{['linux','windows'].map(v => <button key={v} className={platform === v ? 'chosen' : ''} onClick={() => setPlatform(v)}>{v === 'windows' ? '⊞  Windows' : '⌘  Linux'}</button>)}</div>
-        <button className="button primary wide" disabled={busy} onClick={() => action(async () => setIssued(await mutate('/api/enrollment-tokens', 'POST', { os_family: platform })))}>Generate token</button></>
-      : <><p className="warning">Shown once · expires {formatDate(issued.expires_at)}. Keep it private.</p><div className="token">{issued.token}</div><p>Run on the endpoint:</p><pre>{platform === 'windows' ? `jump-agent.exe enroll --server ${issued.agent_url} --token ${issued.token}` : `sudo ./jump-agent enroll --server ${issued.agent_url} --token ${issued.token}`}</pre><p>Then run <code>jump-agent{platform === 'windows' ? '.exe' : ''} run</code> or install it as a service.</p></>}
+      {!issued && <><p>Choose the operating system, download its native agent, then generate a single-use token.</p><div className="platform">{(['linux','windows'] as Platform[]).map(v => <button key={v} type="button" aria-pressed={platform === v} className={platform === v ? 'chosen' : ''} onClick={() => setPlatform(v)}>{v === 'windows' ? '⊞  Windows amd64' : '⌘  Linux amd64'}</button>)}</div></>}
+      <section className="agent-download"><div><strong>{platform === 'windows' ? 'Windows' : 'Linux'} agent</strong><span>{agentRelease?.version ? `Version ${agentRelease.version} · ${agentFilename[platform]}` : 'No release selected'}</span></div>
+        {agentRelease && downloadFor(agentRelease, platform) ? <a className="button" href={downloadFor(agentRelease, platform)} target="_blank" rel="noopener noreferrer">Download {platform === 'windows' ? 'Windows' : 'Linux'} agent ↗</a> : <p>{agentRelease ? 'Set JUMP_AGENT_VERSION to a published tag to enable downloads.' : 'Loading downloads…'}</p>}
+        {agentRelease?.checksums && <a className="subtle-link" href={agentRelease.checksums} target="_blank" rel="noopener noreferrer">SHA-256 checksums ↗</a>}
+        {platform === 'windows' && <small>Windows builds are currently unsigned; SmartScreen may show a warning.</small>}
+      </section>
+      {!issued ? <button className="button primary wide" disabled={busy} onClick={() => action(async () => setIssued(await mutate('/api/enrollment-tokens', 'POST', { os_family: platform })))}>Generate token</button>
+      : <><p className="warning">Shown once · expires {formatDate(issued.expires_at)}. Keep it private.</p><div className="token">{issued.token}</div><p>Run in {platform === 'windows' ? 'an elevated PowerShell window' : 'a terminal'} from the download directory:</p><pre>{enrollmentCommand(platform, issued.agent_url, issued.token)}</pre><p>For persistent presence, install the run command as a service.</p></>}
     </div></div>}
   </div>
 }

@@ -3,6 +3,8 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .releases import valid_release_tag
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -20,8 +22,12 @@ class Settings(BaseSettings):
     jump_master_key: str = ""
     cookie_secure: bool = True
     allowed_hosts: str = "localhost,127.0.0.1,jump"
+    jump_server_version: str = "dev"
+    jump_agent_version: str = ""
 
     def validate_production(self) -> None:
+        if self.jump_agent_version and not valid_release_tag(self.jump_agent_version):
+            raise RuntimeError("JUMP_AGENT_VERSION must be a version tag such as v0.1.0")
         for name in (
             "oidc_issuer",
             "oidc_client_id",

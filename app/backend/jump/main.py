@@ -20,6 +20,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .config import settings
 from .db import get_db
 from .models import AgentIdentity, AuditEvent, Device, EnrollmentToken, Group, Tag, User, now
+from .releases import agent_downloads
 from .schemas import DevicePatch, EnrollmentInput, EnrollRequest, Metadata, NameInput, PresenceInput
 from .security import consume_enrollment, create_enrollment, map_oidc_user, require_admin
 
@@ -364,6 +365,11 @@ def delete_tag(tag_id: uuid.UUID, user: User = Depends(admin), db: Session = Dep
     db.add(AuditEvent(event_type="tag_deleted", actor_user_id=user.id, detail={"id": str(tag_id)}))
     db.commit()
     return {"ok": True}
+
+
+@app.get("/api/agent-downloads")
+def download_links(user: User = Depends(admin)):
+    return agent_downloads(cfg.jump_server_version, cfg.jump_agent_version)
 
 
 @app.post("/api/enrollment-tokens")

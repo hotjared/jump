@@ -37,6 +37,23 @@ Pushes to `main` publish `ghcr.io/hotjared/jump` and `ghcr.io/hotjared/jump-brok
 
 After the first successful publication, the repository owner should open each package under their GitHub profile's **Packages** section, open **Package settings**, and change its visibility to **Public**. The images link to this repository; if they inherit permissions from the private repository, remove inherited permissions in package settings before changing visibility. This is a manual action for both images. Public GHCR images can be pulled anonymously. If either package stays private, authenticate the production Docker host to GHCR with a personal access token (classic) scoped to `read:packages`, from an account with access to that package. Supply it through `docker login ghcr.io -u hotjared --password-stdin` or a credential helper; do not place it in `.env` or Compose.
 
+## Native agent releases
+
+The canonical agent binaries are GitHub Release assets, not files in the repository or the Jump container. Supported targets are Linux amd64 (`jump-agent-linux-amd64`) and Windows amd64 (`jump-agent-windows-amd64.exe`). The same release includes `SHA256SUMS` with hashes of both exact uploaded binaries. The admin enrollment UI links directly to these assets and shows commands using their published filenames. Enrollment still requires a separate one-time token; download URLs never include it.
+
+A push of a `v*` tag, such as `v0.1.0`, starts the dedicated native agent workflow. It checks out the tag, uses the Go version in `agent/go.mod`, cross-compiles both platforms with the tag injected into agent metadata, validates the checksums, and creates or updates the matching GitHub Release using the built-in `GITHUB_TOKEN`. It uploads all three assets. The existing GHCR workflow independently publishes the corresponding `ghcr.io/hotjared/jump` and `ghcr.io/hotjared/jump-broker` image tags. Maintainers should tag the tested `main` commit and push it, for example `git tag v0.1.0 && git push origin v0.1.0`; confirm both workflows succeed before deploying that version. Feature branches and PRs do not publish releases.
+
+The tagged Jump server image carries its own `v*` version and offers the matching agent release by default. `latest` and commit SHA images identify as development builds; set `JUMP_AGENT_VERSION=v0.1.0` (using a real published tag) in `.env` to select an agent release, then run `docker compose up -d` to apply the setting. The override also works for a tagged server when you deliberately need a different agent release. An invalid override is rejected at startup; with no valid version, the UI shows no download link. The server constructs official `hotjared/jump` asset URLs locally and does not call GitHub's API when rendering enrollment.
+
+Download `SHA256SUMS` and verify the selected Linux file in the same directory:
+
+```sh
+grep ' jump-agent-linux-amd64$' SHA256SUMS | sha256sum -c -
+chmod +x jump-agent-linux-amd64
+```
+
+On Windows, run `Get-FileHash .\jump-agent-windows-amd64.exe -Algorithm SHA256` in PowerShell and compare the output with the Windows line in `SHA256SUMS`. Windows builds are currently unsigned and may show a Microsoft SmartScreen warning. Inspect the release and checksum before choosing to run them; no code-signing certificate, workaround, or suppression is part of this release process. The repository must permit intended users to access the GitHub Release assets; if it remains private, GitHub will require repository access for downloads.
+
 ## Update and rollback
 
 Set `JUMP_VERSION=latest` to follow `main`, or pin both images to the same release tag such as `JUMP_VERSION=v0.1.0` or a full commit SHA. Then run:
@@ -48,7 +65,7 @@ docker compose up -d
 
 To roll back, restore the previous `JUMP_VERSION` and repeat those commands. Back up PostgreSQL and `JUMP_MASTER_KEY` before upgrades: a future Alembic migration may make an older application image incompatible with the upgraded database schema, so an image-only rollback may be unsafe.
 
-Build agents from `agent/`. Enroll with the one-time command displayed by the UI. Then run `jump-agent run` under a service manager with automatic restart. On Linux, keep the identity path at mode 0600 in a 0700 directory. On Windows, restrict the `%ProgramData%\Jump` directory to SYSTEM, Administrators and the agent service identity before enrollment. Example elevated command: `icacls "%ProgramData%\Jump" /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"`. Confirm the service identity can read the file. Do not copy private identities between endpoints.
+Download the agent from the enrollment UI. Enroll with the one-time command displayed there, then run the agent under a service manager with automatic restart. On Linux, keep the identity path at mode 0600 in a 0700 directory. On Windows, restrict the `%ProgramData%\Jump` directory to SYSTEM, Administrators and the agent service identity before enrollment. Example elevated command: `icacls "%ProgramData%\Jump" /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"`. Confirm the service identity can read the file. Do not copy private identities between endpoints.
 
 To remove an agent’s access, open its device details as an admin and choose **Revoke agent identity**. Jump retains the device and audit history, marks it offline, rejects the old private key permanently, and asks the broker to close any live connection. If the API reports that the broker disconnect could not be confirmed, the key is still revoked in PostgreSQL; retry the same action when the broker is available. Revocation does not delete the device. A replacement agent must be enrolled as a new device with a new one-time token and local keypair.
 
@@ -71,4 +88,4 @@ Back up `JUMP_MASTER_KEY` separately in a secure secret store. **A database dump
 
 ## Development
 
-Backend: `cd app/backend && uv pip install -e '.[dev]' && alembic upgrade head && pytest && ruff check . && ruff format --check .`. Frontend: `cd app/frontend && npm ci && npm test && npm run typecheck && npm run build`. Go: in `agent` and `broker`, run `go test ./... && go vet ./... && go build ./...`. For local image builds use `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build`. The CI integration script uses the same override. The default production Compose file always pulls prebuilt images.
+Backend: `cd app/backend && uv pip install -e '.[dev]' && alembic upgrade head && pytest && ruff check . && ruff format --check .`. Frontend: `cd app/frontend && npm ci && npm test && npm run typecheck && npm run build`. Go: in `agent` and `broker`, run `go test ./... && go vet ./... && go build ./...`. To build a local agent from source, run `cd agent && go build -o jump-agent .`; it reports `dev` in metadata. For local image builds use `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build`. The CI integration script uses the same override. The default production Compose file always pulls prebuilt images.

@@ -52,7 +52,9 @@ jobs:
       - run: test -z "$(gofmt -l .)"
         working-directory: ${{ matrix.component }}
       - if: matrix.component == 'agent'
-        run: GOOS=windows GOARCH=amd64 go build -o /tmp/jump-agent.exe .
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o /tmp/jump-agent-linux-amd64 .
+          GOOS=windows GOARCH=amd64 go build -o /tmp/jump-agent-windows-amd64.exe .
         working-directory: agent
 
   compose:

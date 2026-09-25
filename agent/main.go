@@ -30,7 +30,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const version = "0.1.0"
+// version is set from the release tag with -ldflags; source builds identify as dev.
+var version = "dev"
 
 type metadata struct {
 	Hostname     string   `json:"hostname"`
