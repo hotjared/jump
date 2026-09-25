@@ -1,0 +1,15 @@
+# Local builds for development and the Compose integration test.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+services:
+  jump:
+    image: jump:dev
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: app/backend/Dockerfile
+
+  broker:
+    image: jump-broker:dev
+    pull_policy: build
+    build:
+      context: ./broker

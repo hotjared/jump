@@ -1,7 +1,15 @@
 .git
 .env
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
 **/node_modules
 **/dist
 **/__pycache__
 **/.pytest_cache
 **/.venv
+**/.ruff_cache
+**/coverage
+**/.coverage
+**/tmp

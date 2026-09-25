@@ -66,10 +66,54 @@ def main():
         envfile = temp / "compose.env"
         envfile.write_text("".join(f"{key}={value}\n" for key, value in variables.items()))
         env = {**os.environ, **variables}
-        compose = ["docker", "compose", "--env-file", str(envfile), "-p", "jump-e2e"]
+        compose = [
+            "docker",
+            "compose",
+            "-f",
+            "docker-compose.yml",
+            "-f",
+            "docker-compose.dev.yml",
+            "--env-file",
+            str(envfile),
+            "-p",
+            "jump-e2e",
+        ]
 
         def dc(*args):
             return run([*compose, *args], env=env)
+
+        production = json.loads(
+            run(
+                [
+                    "docker",
+                    "compose",
+                    "-f",
+                    "docker-compose.yml",
+                    "--env-file",
+                    str(envfile),
+                    "config",
+                    "--format",
+                    "json",
+                ],
+                env=env,
+            )
+        )
+        services = production["services"]
+        assert services["jump"]["image"] == "ghcr.io/hotjared/jump:latest"
+        assert services["broker"]["image"] == "ghcr.io/hotjared/jump-broker:latest"
+        assert all("build" not in service for service in services.values())
+        assert all("ports" not in services[name] for name in ("postgres", "guacd"))
+        published = {
+            (name, str(port["published"]), int(port["target"]), port["host_ip"])
+            for name, service in services.items()
+            for port in service.get("ports", [])
+        }
+        assert published == {
+            ("jump", "8000", 8000, "127.0.0.1"),
+            ("broker", "8080", 8080, "127.0.0.1"),
+        }
+        assert services["jump"]["environment"]["BROKER_INTERNAL_URL"] == "http://broker:8081"
+        assert all("internal" in services[name]["networks"] for name in services)
 
         def db_status():
             script = (
@@ -91,7 +135,32 @@ def main():
         agent_log = None
         try:
             dc("up", "-d", "--build")
+            for image in ("jump:dev", "jump-broker:dev"):
+                image_config = run(["docker", "image", "inspect", image], env=env)
+                image_history = run(
+                    [
+                        "docker",
+                        "image",
+                        "history",
+                        "--no-trunc",
+                        "--format",
+                        "{{.CreatedBy}}",
+                        image,
+                    ],
+                    env=env,
+                )
+                for secret in secrets_map.values():
+                    assert secret not in image_config + image_history, "secret baked into image"
             wait_until(lambda: urlopen("http://localhost:8000/health", timeout=3).status == 200)
+            control_check = (
+                "import os,urllib.request;"
+                "r=urllib.request.Request("
+                "'http://broker:8081/internal/devices/00000000-0000-0000-0000-000000000000/disconnect',"
+                "data=b'',method='POST',"
+                "headers={'Authorization':'Bearer '+os.environ['BROKER_INTERNAL_TOKEN']});"
+                "assert urllib.request.urlopen(r,timeout=3).status==204"
+            )
+            dc("exec", "-T", "jump", "python", "-c", control_check)
             page = urlopen("http://localhost:8000/", timeout=3).read()
             assert b"<title>Jump</title>" in page
             assert db_status() == {
