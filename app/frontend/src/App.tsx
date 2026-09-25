@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { agentFilename, downloadFor, enrollmentCommand, type AgentDownloads, type Platform } from './agent-downloads'
+import { canDeleteDevice, deletionConfirmed, deletionName, deviceDeleteMethod } from './device-actions'
 
 type Named = { id: string; name: string }
 type Device = {
@@ -90,7 +91,14 @@ export default function App() {
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': user!.csrf },
       body: body ? JSON.stringify(body) : undefined,
     })
-    if (!response.ok) throw new Error(`Request failed: ${response.status}`)
+    if (!response.ok) {
+      let detail = `Request failed: ${response.status}`
+      try {
+        const payload = await response.json() as { detail?: string }
+        if (payload.detail) detail = payload.detail
+      } catch {}
+      throw new Error(detail)
+    }
     return response.json() as Promise<T>
   }
   async function action(task: () => Promise<void>) {
@@ -169,12 +177,25 @@ export default function App() {
         {[['Hostname',device.hostname],['Operating system',`${device.os_family} ${device.os_version}`],['Architecture',device.architecture],['IP address',device.primary_ip || '—'],['Current user',device.current_user || '—'],['Last check-in',formatDate(device.last_seen_at)],['Agent version',device.agent_version],['Enrolled',formatDate(device.enrolled_at)],['Capabilities',device.capabilities.join(', ') || '—']].map(([key,value]) => <div className="detail" key={key}><span>{key}</span><strong>{value}</strong></div>)}
         <div className="detail"><span>Group</span>{user.role === 'admin' ? <select value={device.group?.id || ''} onChange={e => action(async () => { await mutate(`/api/devices/${device.id}`, 'PATCH', { display_name: device.display_name, group_id: e.target.value || null, tag_ids: device.tags.map(t => t.id) }); await refresh(true) })}><option value="">Ungrouped</option>{groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select> : <strong>{device.group?.name || 'Ungrouped'}</strong>}</div>
         <div className="detail"><span>Tags</span><div>{tags.map(t => <label className="tag-choice" key={t.id}><input type="checkbox" disabled={user.role !== 'admin' || busy} checked={device.tags.some(dt => dt.id === t.id)} onChange={() => action(async () => { const ids = device.tags.some(dt => dt.id === t.id) ? device.tags.filter(dt => dt.id !== t.id).map(dt => dt.id) : [...device.tags.map(dt => dt.id), t.id]; await mutate(`/api/devices/${device.id}`, 'PATCH', { display_name: device.display_name, group_id: device.group?.id || null, tag_ids: ids }); await refresh(true) })} />{t.name}</label>)}{!tags.length && '—'}</div></div>
-        <section className="identity-control"><h3>Agent identity</h3><p>{device.identity_state === 'revoked' ? 'Revoked. This agent cannot reconnect. The device record and audit history are retained.' : 'Revoking disconnects the agent and permanently rejects its current key. The device record is retained.'}</p>
+        <section className="identity-control"><h3>Agent identity</h3><p>{device.identity_state === 'revoked' ? 'Revoked. This agent cannot reconnect. You may now permanently delete the device record.' : 'Revoking disconnects the agent and permanently rejects its current key. The device record is retained.'}</p>
           {user.role === 'admin' && device.identity_state === 'active' && <button className="button revoke-button" disabled={busy} onClick={() => {
             if (window.confirm(`Revoke ${device.display_name || device.hostname}? Its current agent will disconnect and cannot reconnect with this identity. The device record will remain.`)) {
               action(async () => { await mutate(`/api/devices/${device.id}/revoke`, 'POST'); await refresh(true) })
             }
           }}>Revoke agent identity</button>}
+          {user.role === 'admin' && canDeleteDevice(device) && <button className="button revoke-button" disabled={busy || device.online} onClick={() => {
+            const expected = deletionName(device)
+            const typed = window.prompt(`Permanently delete ${expected}? This cannot be undone. Type "${expected}" to confirm.`)
+            if (deletionConfirmed(device, typed)) {
+              action(async () => {
+                await mutate(`/api/devices/${device.id}`, deviceDeleteMethod)
+                setSelected(null)
+                await refresh(true)
+              })
+            } else if (typed !== null) {
+              setError('Device name did not match. Nothing was deleted.')
+            }
+          }}>Delete device</button>}
         </section>
       </div> : <div className="placeholder compact"><span>◇</span><h2>{tab} is not available yet</h2><p>Connection and action features arrive in a later phase.</p></div>}
     </aside></div>}
@@ -186,7 +207,7 @@ export default function App() {
         {platform === 'windows' && <small>Windows builds are currently unsigned; SmartScreen may show a warning.</small>}
       </section>
       {!issued ? <button className="button primary wide" disabled={busy} onClick={() => action(async () => setIssued(await mutate('/api/enrollment-tokens', 'POST', { os_family: platform })))}>Generate token</button>
-      : <><p className="warning">Shown once · expires {formatDate(issued.expires_at)}. Keep it private.</p><div className="token">{issued.token}</div><p>Run in {platform === 'windows' ? 'an elevated PowerShell window' : 'a terminal'} from the download directory:</p><pre>{enrollmentCommand(platform, issued.agent_url, issued.token)}</pre><p>For persistent presence, install the run command as a service.</p></>}
+      : <><p className="warning">Shown once · expires {formatDate(issued.expires_at)}. Keep it private.</p><div className="token">{issued.token}</div><p>Run in {platform === 'windows' ? 'an elevated PowerShell window' : 'a terminal'} from the download directory:</p><pre>{enrollmentCommand(platform, issued.agent_url, issued.token)}</pre><p>The service keeps the device online after this terminal closes and starts automatically after reboot. Use <code>run</code> only for foreground troubleshooting.</p></>}
     </div></div>}
   </div>
 }
