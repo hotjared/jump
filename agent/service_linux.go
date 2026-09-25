@@ -16,48 +16,58 @@ func runSystemctl(args ...string) error {
 	return nil
 }
 
+var (
+	linuxEffectiveUID    = os.Geteuid
+	linuxCopyExecutable  = copyExecutable
+	linuxWriteFile       = os.WriteFile
+	linuxRemoveFile      = os.Remove
+	linuxSystemctl       = runSystemctl
+	linuxBinaryTarget    = linuxInstallPath
+	linuxUnitTarget      = linuxUnitPath
+)
+
 func installService() error {
-	if os.Geteuid() != 0 {
+	if linuxEffectiveUID() != 0 {
 		return fmt.Errorf("service install requires root; run with sudo")
 	}
-	if err := copyExecutable(linuxInstallPath); err != nil {
+	if err := linuxCopyExecutable(linuxBinaryTarget); err != nil {
 		return err
 	}
-	if err := os.WriteFile(linuxUnitPath, []byte(linuxSystemdUnit()), 0644); err != nil {
+	if err := linuxWriteFile(linuxUnitTarget, []byte(linuxSystemdUnit()), 0644); err != nil {
 		return fmt.Errorf("write systemd unit: %w", err)
 	}
-	if err := runSystemctl("daemon-reload"); err != nil {
+	if err := linuxSystemctl("daemon-reload"); err != nil {
 		return err
 	}
-	if err := runSystemctl("enable", "--now", linuxServiceName); err != nil {
+	if err := linuxSystemctl("enable", "--now", linuxServiceName); err != nil {
 		return err
 	}
 	return nil
 }
 
 func uninstallService() error {
-	if os.Geteuid() != 0 {
+	if linuxEffectiveUID() != 0 {
 		return fmt.Errorf("service uninstall requires root; run with sudo")
 	}
-	_ = runSystemctl("disable", "--now", linuxServiceName)
-	if err := os.Remove(linuxUnitPath); err != nil && !os.IsNotExist(err) {
+	_ = linuxSystemctl("disable", "--now", linuxServiceName)
+	if err := linuxRemoveFile(linuxUnitTarget); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove systemd unit: %w", err)
 	}
-	return runSystemctl("daemon-reload")
+	return linuxSystemctl("daemon-reload")
 }
 
 func startService() error {
-	if os.Geteuid() != 0 {
+	if linuxEffectiveUID() != 0 {
 		return fmt.Errorf("service start requires root; run with sudo")
 	}
-	return runSystemctl("start", linuxServiceName)
+	return linuxSystemctl("start", linuxServiceName)
 }
 
 func stopService() error {
-	if os.Geteuid() != 0 {
+	if linuxEffectiveUID() != 0 {
 		return fmt.Errorf("service stop requires root; run with sudo")
 	}
-	return runSystemctl("stop", linuxServiceName)
+	return linuxSystemctl("stop", linuxServiceName)
 }
 
 func runAgentCommand() error {
