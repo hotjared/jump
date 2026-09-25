@@ -7,11 +7,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
-from jump.db import get_db
-from jump.models import AgentIdentity, AuditEvent, Device, Role, User
 from sqlalchemy import select
 
+from jump.db import get_db
 from jump.main import app
+from jump.models import AgentIdentity, AuditEvent, Device, Role, User
 
 ORIGIN = "http://localhost:8000"
 BROKER = {"Authorization": "Bearer test-broker-token-at-least-32-characters"}
