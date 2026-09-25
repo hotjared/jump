@@ -16,9 +16,7 @@ services:
     networks: [internal]
 
   jump:
-    build:
-      context: .
-      dockerfile: app/backend/Dockerfile
+    image: ghcr.io/hotjared/jump:${JUMP_VERSION:-latest}
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+psycopg://jump:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/jump
@@ -47,7 +45,7 @@ services:
     networks: [internal]
 
   broker:
-    build: ./broker
+    image: ghcr.io/hotjared/jump-broker:${JUMP_VERSION:-latest}
     restart: unless-stopped
     environment:
       JUMP_INTERNAL_URL: http://jump:8000

@@ -66,7 +66,18 @@ def main():
         envfile = temp / "compose.env"
         envfile.write_text("".join(f"{key}={value}\n" for key, value in variables.items()))
         env = {**os.environ, **variables}
-        compose = ["docker", "compose", "--env-file", str(envfile), "-p", "jump-e2e"]
+        compose = [
+            "docker",
+            "compose",
+            "-f",
+            "docker-compose.yml",
+            "-f",
+            "docker-compose.dev.yml",
+            "--env-file",
+            str(envfile),
+            "-p",
+            "jump-e2e",
+        ]
 
         def dc(*args):
             return run([*compose, *args], env=env)
