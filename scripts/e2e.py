@@ -147,7 +147,12 @@ def main():
             for secret in secrets_map.values():
                 assert secret not in logs, "secret appeared in container logs"
             for marker in ("Traceback", "panic:", "migration error", '"level":"ERROR"'):
-                assert marker not in logs, f"unexpected log marker: {marker}"
+                if marker in logs:
+                    matches = [line for line in logs.splitlines() if marker in line]
+                    diagnostic = "\n".join(matches[-20:])
+                    for secret in (*secrets_map.values(), token):
+                        diagnostic = diagnostic.replace(secret, "[REDACTED]")
+                    raise AssertionError(f"unexpected log marker: {marker}\n{diagnostic}")
             warnings = [line for line in logs.splitlines() if '"level":"WARN"' in line]
             print(f"Structured warning lines during restart: {len(warnings)}")
             print("Compose, migration, UI, enrollment, heartbeat, restart and persistence: passed")
