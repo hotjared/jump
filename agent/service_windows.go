@@ -103,8 +103,8 @@ func setWindowsServiceStatus(handle uintptr, state, accepted uint32) error {
 	return nil
 }
 
-func windowsServiceControl(control, eventType uint32, eventData, context uintptr) uintptr {
-	switch control {
+func windowsServiceControl(control, eventType, eventData, callbackContext uintptr) uintptr {
+	switch uint32(control) {
 	case serviceControlStop, serviceControlShutdown:
 		if serviceCancel != nil {
 			serviceCancel()
@@ -113,14 +113,14 @@ func windowsServiceControl(control, eventType uint32, eventData, context uintptr
 	return 0
 }
 
-func windowsServiceMain(argc uint32, argv **uint16) {
+func windowsServiceMain(argc, argv uintptr) uintptr {
 	name, _ := syscall.UTF16PtrFromString(windowsServiceName)
 	handler := syscall.NewCallback(windowsServiceControl)
 	handle, _, _ := procRegisterServiceCtrlHandlerEx.Call(
 		uintptr(unsafe.Pointer(name)), handler, 0,
 	)
 	if handle == 0 {
-		return
+		return 0
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	serviceCancel = cancel
@@ -133,6 +133,7 @@ func windowsServiceMain(argc uint32, argv **uint16) {
 	_ = setWindowsServiceStatus(handle, serviceRunning, serviceAcceptStop|serviceAcceptShutdown)
 	_ = run(ctx)
 	_ = setWindowsServiceStatus(handle, serviceStopPending, 0)
+	return 0
 }
 
 func runWindowsService() error {
