@@ -138,7 +138,15 @@ def main():
             for image in ("jump:dev", "jump-broker:dev"):
                 image_config = run(["docker", "image", "inspect", image], env=env)
                 image_history = run(
-                    ["docker", "image", "history", "--no-trunc", "--format", "{{.CreatedBy}}", image],
+                    [
+                        "docker",
+                        "image",
+                        "history",
+                        "--no-trunc",
+                        "--format",
+                        "{{.CreatedBy}}",
+                        image,
+                    ],
                     env=env,
                 )
                 for secret in secrets_map.values():
