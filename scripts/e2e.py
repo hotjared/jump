@@ -192,7 +192,9 @@ def main():
                     raise AssertionError(f"unexpected log marker: {marker}\n{diagnostic}")
             warnings = [line for line in logs.splitlines() if '"level":"WARN"' in line]
             print(f"Structured warning lines during restart: {len(warnings)}")
-            print("Compose, migration, enrollment, heartbeat, restart, revocation and persistence: passed")
+            print(
+                "Compose, migration, enrollment, heartbeat, restart, revocation and persistence: passed"
+            )
         finally:
             if agent:
                 agent.terminate()
