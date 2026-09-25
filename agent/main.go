@@ -302,10 +302,16 @@ func run(ctx context.Context) error {
 	return nil
 }
 
+func runForeground() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return run(ctx)
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: jump-agent enroll --server URL --token TOKEN | run")
+		fmt.Fprintln(os.Stderr, "usage: jump-agent enroll --server URL --token TOKEN | run | service install|uninstall|start|stop")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -323,10 +329,13 @@ func main() {
 			os.Exit(1)
 		}
 	case "run":
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		if err := run(ctx); err != nil {
+		if err := runAgentCommand(); err != nil {
 			slog.Error("agent stopped", "error", err)
+			os.Exit(1)
+		}
+	case "service":
+		if err := serviceCommand(os.Args[2:]); err != nil {
+			slog.Error("service command failed", "error", err)
 			os.Exit(1)
 		}
 	default:
