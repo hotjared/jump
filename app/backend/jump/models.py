@@ -79,7 +79,7 @@ class Device(Base):
     group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"))
     group: Mapped[Group | None] = relationship()
     tags: Mapped[list[Tag]] = relationship(secondary=device_tags, lazy="selectin")
-    agent_identity: Mapped["AgentIdentity | None"] = relationship("AgentIdentity", uselist=False)
+    agent_identity: Mapped["AgentIdentity | None"] = relationship(\n        "AgentIdentity", uselist=False, cascade="all, delete-orphan", passive_deletes=True\n    )\n    credentials: Mapped[list["Credential"]] = relationship(\n        "Credential", cascade="all, delete-orphan", passive_deletes=True\n    )
     online: Mapped[bool] = mapped_column(Boolean, default=False)
     connection_id: Mapped[str | None] = mapped_column(String(36))
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
