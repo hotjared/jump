@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     oidc_redirect_uri: str = ""
     public_url: str = "http://localhost:8000"
     agent_url: str = "http://localhost:8080"
+    broker_internal_url: str = "http://broker:8081"
     session_secret: str = ""
     broker_internal_token: str = ""
     jump_master_key: str = ""
