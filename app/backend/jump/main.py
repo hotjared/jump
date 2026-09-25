@@ -8,7 +8,6 @@ import uuid
 from pathlib import Path
 
 import httpx
-
 from authlib.integrations.starlette_client import OAuth
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
@@ -132,8 +131,11 @@ def serialize_device(device: Device) -> dict:
         "tags": [{"id": str(tag.id), "name": tag.name} for tag in device.tags],
         "online": device.online,
         "identity_state": (
-            "revoked" if device.agent_identity and device.agent_identity.revoked_at
-            else "active" if device.agent_identity else "none"
+            "revoked"
+            if device.agent_identity and device.agent_identity.revoked_at
+            else "active"
+            if device.agent_identity
+            else "none"
         ),
         "last_seen_at": device.last_seen_at,
         "enrolled_at": device.enrolled_at,
@@ -231,7 +233,9 @@ def disconnect_revoked_agent(device_id: uuid.UUID) -> None:
             )
             response.raise_for_status()
     except httpx.HTTPError as exc:
-        log.warning(json.dumps({"event": "revocation_disconnect_failed", "device_id": str(device_id)}))
+        log.warning(
+            json.dumps({"event": "revocation_disconnect_failed", "device_id": str(device_id)})
+        )
         raise HTTPException(
             503, "Identity revoked, but the active broker disconnect could not be confirmed"
         ) from exc
@@ -479,9 +483,9 @@ def connected(device_id: uuid.UUID, body: PresenceInput, db: Session = Depends(g
     if not device:
         raise HTTPException(404)
     identity = db.scalar(
-        select(AgentIdentity).where(
-            AgentIdentity.device_id == device_id, AgentIdentity.revoked_at.is_(None)
-        ).with_for_update()
+        select(AgentIdentity)
+        .where(AgentIdentity.device_id == device_id, AgentIdentity.revoked_at.is_(None))
+        .with_for_update()
     )
     if not identity:
         raise HTTPException(403, "Agent identity revoked")
