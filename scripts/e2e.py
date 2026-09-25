@@ -8,7 +8,8 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -75,12 +76,13 @@ def main():
                 "import json;"
                 "from sqlalchemy import select,func,text;"
                 "from jump.db import SessionLocal;"
-                "from jump.models import Device;"
+                "from jump.models import AgentIdentity,Device;"
                 "s=SessionLocal();"
                 "d=s.scalar(select(Device).limit(1));"
                 "print(json.dumps({'count':s.scalar(select(func.count(Device.id))),"
                 "'online':d.online if d else False,"
                 "'last_seen':d.last_seen_at.isoformat() if d and d.last_seen_at else None,"
+                "'revoked':bool(s.scalar(select(AgentIdentity.revoked_at).where(AgentIdentity.device_id==d.id))) if d else False,"
                 "'revision':s.execute(text('select version_num from alembic_version')).scalar()}))"
             )
             return json.loads(dc("exec", "-T", "jump", "python", "-c", script))
@@ -96,6 +98,7 @@ def main():
                 "count": 0,
                 "online": False,
                 "last_seen": None,
+                "revoked": False,
                 "revision": "0001",
             }
 
@@ -140,6 +143,40 @@ def main():
             assert later["online"] and later["last_seen"] > first_seen
             dc("restart", "jump", "broker")
             wait_until(lambda: db_status()["count"] == 1 and db_status()["online"])
+            device_id = json.loads((temp / "identity.json").read_text())["device_id"]
+            cookie_script = (
+                "import os,base64,json;"
+                "from itsdangerous import TimestampSigner;"
+                "from jump.db import SessionLocal;"
+                "from jump.models import User;"
+                "from sqlalchemy import select;"
+                "s=SessionLocal();"
+                "u=s.scalar(select(User).where(User.oidc_subject=='test-admin'));"
+                "state=base64.b64encode(json.dumps({'uid':str(u.id),'csrf':'e2e-csrf'}).encode());"
+                "print(TimestampSigner(os.environ['SESSION_SECRET']).sign(state).decode())"
+            )
+            cookie = dc("exec", "-T", "jump", "python", "-c", cookie_script).strip()
+            revoke_request = Request(
+                f"http://localhost:8000/api/devices/{device_id}/revoke",
+                data=b"",
+                headers={
+                    "Cookie": f"jump_session={cookie}",
+                    "Origin": "http://localhost:8000",
+                    "X-CSRF-Token": "e2e-csrf",
+                },
+                method="POST",
+            )
+            with urlopen(revoke_request, timeout=10) as response:
+                assert response.status == 200
+                assert json.load(response)["identity_state"] == "revoked"
+            wait_until(lambda: db_status()["revoked"] and not db_status()["online"])
+            assert db_status()["count"] == 1
+            try:
+                urlopen(f"http://localhost:8080/connect?device_id={device_id}", timeout=3)
+            except HTTPError as exc:
+                assert exc.code == 401, f"revoked identity returned {exc.code}"
+            else:
+                raise AssertionError("revoked identity was allowed to reconnect")
             logs = dc("logs", "--no-color", "jump", "broker")
             agent_log.flush()
             agent_log.seek(0)
@@ -155,7 +192,7 @@ def main():
                     raise AssertionError(f"unexpected log marker: {marker}\n{diagnostic}")
             warnings = [line for line in logs.splitlines() if '"level":"WARN"' in line]
             print(f"Structured warning lines during restart: {len(warnings)}")
-            print("Compose, migration, UI, enrollment, heartbeat, restart and persistence: passed")
+            print("Compose, migration, enrollment, heartbeat, restart, revocation and persistence: passed")
         finally:
             if agent:
                 agent.terminate()
