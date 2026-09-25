@@ -130,3 +130,81 @@ def test_groups_tags_and_device_edit(client, db):
     assert client.delete(f"/api/tags/{tag['id']}", headers=write_headers()).status_code == 200
     db.expire_all()
     assert client.get("/api/devices").json()[0]["tags"] == []
+
+
+def test_revoke_identity_disconnects_and_prevents_reconnect(client, db, monkeypatch):
+    user = as_user(client, db)
+    created = client.post(
+        "/api/enrollment-tokens", json={"os_family": "linux"}, headers=write_headers()
+    ).json()
+    pub = Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    enrollment = client.post(
+        "/api/internal/enroll",
+        json={
+            "token": created["token"],
+            "public_key": base64.b64encode(pub).decode(),
+            "metadata": META,
+        },
+        headers=BROKER,
+    )
+    assert enrollment.status_code == 200
+    device_id = enrollment.json()["device_id"]
+    url = f"/api/internal/devices/{device_id}"
+    presence = {"connection_id": "live-connection", "metadata": META}
+    assert client.post(url + "/connected", json=presence, headers=BROKER).status_code == 200
+
+    disconnected = []
+    monkeypatch.setattr("jump.main.disconnect_revoked_agent", disconnected.append)
+    user.role = Role.USER
+    db.commit()
+    assert client.post(url + "/revoke", headers=write_headers()).status_code == 403
+    user.role = Role.ADMIN
+    db.commit()
+    assert client.post(url + "/revoke").status_code == 403
+    response = client.post(url + "/revoke", headers=write_headers())
+    assert response.status_code == 200, response.text
+    assert response.json()["identity_state"] == "revoked"
+    assert response.json()["online"] is False
+    assert disconnected == [uuid.UUID(device_id)]
+    assert client.get("/api/internal/identities/" + device_id, headers=BROKER).status_code == 404
+    assert client.post(url + "/connected", json=presence, headers=BROKER).status_code == 403
+    assert client.post(url + "/heartbeat", json=presence, headers=BROKER).status_code == 409
+    assert db.get(Device, uuid.UUID(device_id)) is not None
+    assert client.get(url).json()["identity_state"] == "revoked"
+    assert client.post(url + "/revoke", headers=write_headers()).status_code == 200
+    assert disconnected == [uuid.UUID(device_id), uuid.UUID(device_id)]
+    events = db.scalars(
+        select(AuditEvent).where(AuditEvent.event_type == "agent_identity_revoked")
+    ).all()
+    assert len(events) == 1
+    assert events[0].actor_user_id == user.id
+    assert events[0].device_id == uuid.UUID(device_id)
+
+
+def test_failed_broker_disconnect_preserves_revocation(client, db, monkeypatch):
+    from fastapi import HTTPException
+
+    as_user(client, db)
+    device = Device(hostname="host", os_family="linux", capabilities=[], addresses=[])
+    db.add(device)
+    db.flush()
+    db.add(AgentIdentity(device_id=device.id, public_key=b"x" * 32))
+    db.commit()
+    device.online, device.connection_id = True, "still-connected"
+    db.commit()
+
+    def unavailable(_device_id):
+        raise HTTPException(503, "Broker unavailable")
+
+    monkeypatch.setattr("jump.main.disconnect_revoked_agent", unavailable)
+    response = client.post(f"/api/devices/{device.id}/revoke", headers=write_headers())
+    assert response.status_code == 503
+    db.expire_all()
+    assert db.get(Device, device.id).online is False
+    assert client.get(f"/api/devices/{device.id}").json()["identity_state"] == "revoked"
+    assert client.get(f"/api/internal/identities/{device.id}", headers=BROKER).status_code == 404
+    monkeypatch.setattr("jump.main.disconnect_revoked_agent", lambda _device_id: None)
+    assert client.post(f"/api/devices/{device.id}/revoke", headers=write_headers()).status_code == 200
+    assert db.scalar(
+        select(AuditEvent).where(AuditEvent.event_type == "agent_identity_revoked")
+    ) is not None
