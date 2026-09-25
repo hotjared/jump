@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -192,14 +193,18 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	connectionID := randomID()
+	// Serialize registration with a revocation disconnect. The API locks the
+	// device row and rejects revoked identities even if the key was fetched
+	// before the admin revoked it.
+	b.mu.Lock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	err = b.call(ctx, "POST", "/api/internal/devices/"+id+"/connected",
 		map[string]any{"connection_id": connectionID, "metadata": auth.Metadata}, nil)
 	cancel()
 	if err != nil {
+		b.mu.Unlock()
 		return
 	}
-	b.mu.Lock()
 	previous := b.active[id]
 	b.active[id] = conn
 	b.mu.Unlock()
@@ -269,6 +274,28 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// The control listener is private to the Compose network and additionally
+// authenticated with the broker-to-API bearer secret.
+func (b *broker) disconnect(w http.ResponseWriter, r *http.Request) {
+	if subtle.ConstantTimeCompare(
+		[]byte(r.Header.Get("Authorization")), []byte("Bearer "+b.token),
+	) != 1 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id := r.PathValue("id")
+	if len(id) != 36 {
+		http.Error(w, "invalid device id", http.StatusBadRequest)
+		return
+	}
+	b.mu.Lock()
+	if conn := b.active[id]; conn != nil {
+		conn.Close()
+	}
+	b.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func randomID() string {
 	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {
@@ -313,6 +340,9 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("/enroll", b.enroll)
 	mux.HandleFunc("/connect", b.ws)
+	internalMux := http.NewServeMux()
+	internalMux.HandleFunc("POST /internal/devices/{id}/disconnect", b.disconnect)
+	internalServer := &http.Server{Addr: ":8081", Handler: internalMux, ReadHeaderTimeout: 5 * time.Second}
 	server := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	shutdown, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -322,11 +352,18 @@ func main() {
 			stop()
 		}
 	}()
+	go func() {
+		if err := internalServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("internal server stopped", "error", err)
+			stop()
+		}
+	}()
 	slog.Info("broker ready")
 	<-shutdown.Done()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	server.Shutdown(ctx)
+	internalServer.Shutdown(ctx)
 	b.mu.Lock()
 	for _, conn := range b.active {
 		conn.Close()
