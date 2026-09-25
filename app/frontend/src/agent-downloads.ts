@@ -17,7 +17,7 @@ export function downloadFor(release: AgentDownloads, platform: Platform): string
 export function enrollmentCommand(platform: Platform, server: string, token: string): string {
   const filename = agentFilename[platform]
   if (platform === 'windows') {
-    return `.\\${filename} enroll --server ${server} --token ${token}\n.\\${filename} run`
+    return `.\\${filename} enroll --server ${server} --token ${token}\n.\\${filename} service install`
   }
-  return `chmod +x ${filename}\nsudo ./${filename} enroll --server ${server} --token ${token}\nsudo ./${filename} run`
+  return `chmod +x ${filename}\nsudo ./${filename} enroll --server ${server} --token ${token}\nsudo ./${filename} service install`
 }
