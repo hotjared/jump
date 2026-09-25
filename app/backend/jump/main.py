@@ -360,7 +360,8 @@ def enroll(body: EnrollRequest, db: Session = Depends(get_db)):
     db.add(AgentIdentity(device_id=device.id, public_key=public_key))
     db.add(
         AuditEvent(
-            event_type="device_enrolled", actor_user_id=enrollment.created_by_id,
+            event_type="device_enrolled",
+            actor_user_id=enrollment.created_by_id,
             device_id=device.id,
         )
     )

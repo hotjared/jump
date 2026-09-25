@@ -15,12 +15,16 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
 const maxMessage = 16 * 1024
+
+var pingInterval = 25 * time.Second
+var heartbeatTimeout = 65 * time.Second
 
 type message struct {
 	Version      int             `json:"version"`
@@ -217,7 +221,9 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.SetReadDeadline(time.Now().Add(75 * time.Second))
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(75 * time.Second)) })
-	ticker := time.NewTicker(25 * time.Second)
+	var lastHeartbeat atomic.Int64
+	lastHeartbeat.Store(time.Now().UnixNano())
+	ticker := time.NewTicker(pingInterval)
 	defer ticker.Stop()
 	done := make(chan struct{})
 	go func() {
@@ -237,6 +243,7 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return
 			}
+			lastHeartbeat.Store(time.Now().UnixNano())
 			conn.SetReadDeadline(time.Now().Add(75 * time.Second))
 		}
 	}()
@@ -245,6 +252,10 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 		case <-done:
 			return
 		case <-ticker.C:
+			if time.Since(time.Unix(0, lastHeartbeat.Load())) > heartbeatTimeout {
+				slog.Warn("agent heartbeat timed out", "device_id", id)
+				return
+			}
 			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if conn.WriteMessage(websocket.PingMessage, nil) != nil {
 				return

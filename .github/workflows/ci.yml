@@ -47,7 +47,7 @@ jobs:
         with:
           go-version: "1.27"
           cache: false
-      - run: go mod download && go test ./... && go vet ./... && go build ./...
+      - run: go mod tidy && go test ./... && go vet ./... && go build ./...
         working-directory: ${{ matrix.component }}
       - run: test -z "$(gofmt -l .)"
         working-directory: ${{ matrix.component }}

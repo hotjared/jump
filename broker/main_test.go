@@ -98,4 +98,48 @@ func TestAgentChallengePresenceAndReplay(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	oldInterval, oldTimeout := pingInterval, heartbeatTimeout
+	pingInterval, heartbeatTimeout = 15*time.Millisecond, 45*time.Millisecond
+	defer func() { pingInterval, heartbeatTimeout = oldInterval, oldTimeout }()
+	idle, fresh := connect()
+	defer idle.Close()
+	freshNonce, _ := base64.StdEncoding.DecodeString(fresh.Challenge)
+	freshSignature := base64.StdEncoding.EncodeToString(
+		ed25519.Sign(private, append([]byte("jump-agent-v1:"), freshNonce...)),
+	)
+	if err := idle.WriteJSON(message{
+		Version: 1, Type: "auth", DeviceID: deviceID, Signature: freshSignature,
+		Metadata: json.RawMessage(`{"hostname":"test","os_family":"linux"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idle.ReadJSON(&ready); err != nil {
+		t.Fatal(err)
+	}
+	idle.SetReadDeadline(time.Now().Add(time.Second))
+	for {
+		var incoming message
+		if err := idle.ReadJSON(&incoming); err != nil {
+			break
+		}
+	}
+	deadline = time.Now().Add(time.Second)
+	for {
+		mu.Lock()
+		snapshot := append([]string(nil), events...)
+		mu.Unlock()
+		disconnections := 0
+		for _, event := range snapshot {
+			if strings.HasSuffix(event, "/disconnected") {
+				disconnections++
+			}
+		}
+		if disconnections >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("idle connection was not marked offline: %v", snapshot)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
