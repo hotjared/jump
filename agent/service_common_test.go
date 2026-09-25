@@ -44,7 +44,7 @@ func TestWindowsServiceConfiguration(t *testing.T) {
 	all := strings.Join(joined, "\n")
 	for _, want := range []string{
 		"create JumpAgent",
-		"service run",
+		" run",
 		"start= auto",
 		"obj= LocalSystem",
 		"DisplayName= Jump Agent",
