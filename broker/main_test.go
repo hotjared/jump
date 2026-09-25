@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -142,4 +143,83 @@ func TestAgentChallengePresenceAndReplay(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func TestRevocationClosesActiveConnectionAndRejectsReconnect(t *testing.T) {
+	public, private, _ := ed25519.GenerateKey(rand.Reader)
+	deviceID := "bd0b50e5-4cad-4fcf-9666-3bf2f8e43b4c"
+	token := "test-token-with-at-least-32-characters"
+	var revoked atomic.Bool
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", 401)
+			return
+		}
+		if revoked.Load() && (strings.Contains(r.URL.Path, "identities") || strings.HasSuffix(r.URL.Path, "/connected")) {
+			http.Error(w, "revoked", 403)
+			return
+		}
+		if strings.Contains(r.URL.Path, "identities") {
+			json.NewEncoder(w).Encode(map[string]string{"public_key": base64.StdEncoding.EncodeToString(public)})
+		} else {
+			w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	defer api.Close()
+	b := &broker{api: api.URL, token: token, client: api.Client(), active: make(map[string]*websocket.Conn)}
+	publicMux := http.NewServeMux()
+	publicMux.HandleFunc("/connect", b.ws)
+	publicServer := httptest.NewServer(publicMux)
+	defer publicServer.Close()
+	controlMux := http.NewServeMux()
+	controlMux.HandleFunc("POST /internal/devices/{id}/disconnect", b.disconnect)
+	controlServer := httptest.NewServer(controlMux)
+	defer controlServer.Close()
+
+	endpoint := "ws" + strings.TrimPrefix(publicServer.URL, "http") + "/connect?device_id=" + deviceID
+	conn, _, err := websocket.DefaultDialer.Dial(endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var challenge message
+	if err := conn.ReadJSON(&challenge); err != nil {
+		t.Fatal(err)
+	}
+	nonce, _ := base64.StdEncoding.DecodeString(challenge.Challenge)
+	signature := base64.StdEncoding.EncodeToString(ed25519.Sign(private, append([]byte("jump-agent-v1:"), nonce...)))
+	if err := conn.WriteJSON(message{Version: 1, Type: "auth", DeviceID: deviceID, Signature: signature,
+		Metadata: json.RawMessage(`{"hostname":"test","os_family":"linux"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	var ready message
+	if err := conn.ReadJSON(&ready); err != nil || ready.Type != "ready" {
+		t.Fatalf("ready: %v %v", ready, err)
+	}
+	path := controlServer.URL + "/internal/devices/" + deviceID + "/disconnect"
+	request, _ := http.NewRequest(http.MethodPost, path, nil)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("control endpoint allowed unauthenticated request: %v %v", response, err)
+	}
+	response.Body.Close()
+
+	revoked.Store(true)
+	request, _ = http.NewRequest(http.MethodPost, path, nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusNoContent {
+		t.Fatalf("disconnect failed: %v %v", response, err)
+	}
+	response.Body.Close()
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	if err := conn.ReadJSON(&ready); err == nil {
+		t.Fatal("active revoked connection remained open")
+	}
+	b.wg.Wait()
+	_, response, err = websocket.DefaultDialer.Dial(endpoint, nil)
+	if err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("revoked identity reconnected: %v %v", response, err)
+	}
+	response.Body.Close()
 }
