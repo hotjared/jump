@@ -150,6 +150,7 @@ def test_revoke_identity_disconnects_and_prevents_reconnect(client, db, monkeypa
     assert enrollment.status_code == 200
     device_id = enrollment.json()["device_id"]
     url = f"/api/internal/devices/{device_id}"
+    admin_url = f"/api/devices/{device_id}"
     presence = {"connection_id": "live-connection", "metadata": META}
     assert client.post(url + "/connected", json=presence, headers=BROKER).status_code == 200
 
@@ -157,7 +158,7 @@ def test_revoke_identity_disconnects_and_prevents_reconnect(client, db, monkeypa
     monkeypatch.setattr("jump.main.disconnect_revoked_agent", disconnected.append)
     user.role = Role.USER
     db.commit()
-    assert client.post(url + "/revoke", headers=write_headers()).status_code == 403
+    assert client.post(admin_url + "/revoke", headers=write_headers()).status_code == 403
     user.role = Role.ADMIN
     db.commit()
     assert client.post(url + "/revoke").status_code == 403
@@ -170,7 +171,7 @@ def test_revoke_identity_disconnects_and_prevents_reconnect(client, db, monkeypa
     assert client.post(url + "/connected", json=presence, headers=BROKER).status_code == 403
     assert client.post(url + "/heartbeat", json=presence, headers=BROKER).status_code == 409
     assert db.get(Device, uuid.UUID(device_id)) is not None
-    assert client.get(url).json()["identity_state"] == "revoked"
+    assert client.get(admin_url).json()["identity_state"] == "revoked"
     assert client.post(url + "/revoke", headers=write_headers()).status_code == 200
     assert disconnected == [uuid.UUID(device_id), uuid.UUID(device_id)]
     events = db.scalars(
