@@ -1,0 +1,40 @@
+name: Release native agent
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+      - name: Build native binaries and checksums
+        working-directory: agent
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p ../dist
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${RELEASE_VERSION}" -o ../dist/jump-agent-linux-amd64 .
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${RELEASE_VERSION}" -o ../dist/jump-agent-windows-amd64.exe .
+          cd ../dist
+          sha256sum jump-agent-linux-amd64 jump-agent-windows-amd64.exe > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - name: Publish GitHub Release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
+            gh release create "$RELEASE_VERSION" --verify-tag --generate-notes
+          fi
+          gh release upload "$RELEASE_VERSION" dist/jump-agent-linux-amd64 dist/jump-agent-windows-amd64.exe dist/SHA256SUMS --clobber

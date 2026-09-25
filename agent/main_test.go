@@ -109,3 +109,12 @@ func TestServerRequiresTLS(t *testing.T) {
 		t.Fatal("local development rejected")
 	}
 }
+
+func TestVersionReportedInMetadata(t *testing.T) {
+	previous := version
+	version = "v1.2.3"
+	t.Cleanup(func() { version = previous })
+	if got := info().AgentVersion; got != "v1.2.3" {
+		t.Fatalf("agent version = %q, want release version", got)
+	}
+}

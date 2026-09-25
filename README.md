@@ -27,13 +27,28 @@ Screenshots use illustrative device data:
 3. Set `JUMP_BIND_ADDRESS` to the Jump host's private LAN IP when Nginx Proxy Manager runs on another host. Allow only that NPM host to reach TCP 8000 and 8080 on the Jump host. Configure HTTPS, WebSocket support on the agent host, and the [proxy settings](docs/deployment.md).
 4. Run `docker compose pull && docker compose up -d`. The application applies Alembic migrations before starting. The production Compose file uses `ghcr.io/hotjared/jump` and `ghcr.io/hotjared/jump-broker`; it does not build locally. The repository owner must make both GHCR packages public after their first publication, or the server must authenticate with a read-only package token.
 5. Sign in. **The first successfully authenticated OIDC user becomes admin.** Subsequent users are created with the `user` role. Configure the identity provider to admit only intended users before exposing Jump.
-6. In **Devices → Enroll device**, choose an OS, generate a token, run the displayed command on the endpoint, then run `jump-agent run`. The token expires after 15 minutes and is shown once.
+6. In **Devices → Enroll device**, choose an OS, download the native agent, generate a token, and run the displayed enrollment and run commands on the endpoint. The token expires after 15 minutes and is shown once.
 
 The agent defaults to `/var/lib/jump-agent/identity.json` on Linux and `%ProgramData%\Jump\identity.json` on Windows. Run it under a dedicated service account or as an administrator. Use `JUMP_AGENT_STATE` to set another path. The broker only accepts inbound requests through the reverse proxy; endpoints initiate all connections.
 
 For upgrades, rollback, GHCR visibility, and local image builds for development, see [deployment and operations](docs/deployment.md).
 
-## Build agent
+## Native agent downloads
+
+Jump offers Linux amd64 and Windows amd64 binaries from the matching [GitHub Release](https://github.com/hotjared/jump/releases). The enrollment UI links to the selected binary and `SHA256SUMS`; no Go toolchain or source checkout is needed on endpoints. A tagged server image offers its matching agent release. When deploying `latest` or a commit SHA, set `JUMP_AGENT_VERSION` to an existing `v*` release tag in `.env` and restart Jump. The UI does not offer a download until a release version is known and its assets have been published.
+
+Download `SHA256SUMS` alongside the binary. On Linux, verify the selected entry with:
+
+```sh
+grep ' jump-agent-linux-amd64$' SHA256SUMS | sha256sum -c -
+chmod +x jump-agent-linux-amd64
+```
+
+On Windows, run `Get-FileHash .\jump-agent-windows-amd64.exe -Algorithm SHA256` in PowerShell and compare its hash with the Windows line in `SHA256SUMS`. Windows binaries are currently unsigned and may trigger Microsoft SmartScreen. Check the release source and hash before deciding whether to run one; Jump does not bypass Windows warnings.
+
+For service deployment, use systemd on Linux or Windows Service Control Manager with a service wrapper. Restrict the identity file to the service account and administrators.
+
+## Build agent from source (developers)
 
 ```sh
 cd agent
@@ -41,7 +56,7 @@ go build -o jump-agent .
 GOOS=windows GOARCH=amd64 go build -o jump-agent.exe .
 ```
 
-For service deployment, use systemd on Linux or Windows Service Control Manager with a service wrapper. Restrict the identity file to the service account and administrators.
+Source builds report `dev`; release builds report the tag in the device metadata.
 
 ## Status
 
