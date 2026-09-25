@@ -7,11 +7,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
+from jump.db import get_db
+from jump.models import AgentIdentity, AuditEvent, Device, Role, User
 from sqlalchemy import select
 
-from jump.db import get_db
 from jump.main import app
-from jump.models import AgentIdentity, AuditEvent, Device, Role, User
 
 ORIGIN = "http://localhost:8000"
 BROKER = {"Authorization": "Bearer test-broker-token-at-least-32-characters"}
@@ -205,7 +205,10 @@ def test_failed_broker_disconnect_preserves_revocation(client, db, monkeypatch):
     assert client.get(f"/api/devices/{device.id}").json()["identity_state"] == "revoked"
     assert client.get(f"/api/internal/identities/{device.id}", headers=BROKER).status_code == 404
     monkeypatch.setattr("jump.main.disconnect_revoked_agent", lambda _device_id: None)
-    assert client.post(f"/api/devices/{device.id}/revoke", headers=write_headers()).status_code == 200
-    assert db.scalar(
-        select(AuditEvent).where(AuditEvent.event_type == "agent_identity_revoked")
-    ) is not None
+    assert (
+        client.post(f"/api/devices/{device.id}/revoke", headers=write_headers()).status_code == 200
+    )
+    assert (
+        db.scalar(select(AuditEvent).where(AuditEvent.event_type == "agent_identity_revoked"))
+        is not None
+    )
