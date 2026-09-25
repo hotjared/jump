@@ -59,3 +59,7 @@ func stopService() error {
 	}
 	return runSystemctl("stop", linuxServiceName)
 }
+
+func runAgentCommand() error {
+	return runForeground()
+}
