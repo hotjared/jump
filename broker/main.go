@@ -13,9 +13,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -43,6 +45,7 @@ type broker struct {
 	mu     sync.Mutex
 	active map[string]*websocket.Conn
 	limits map[string]window
+	wg     sync.WaitGroup
 }
 
 type window struct {
@@ -203,6 +206,8 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 	if previous != nil {
 		previous.Close()
 	}
+	b.wg.Add(1)
+	defer b.wg.Done()
 	defer func() {
 		b.mu.Lock()
 		if b.active[id] == conn {
@@ -296,8 +301,30 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("/enroll", b.enroll)
 	mux.HandleFunc("/connect", b.ws)
+	server := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	shutdown, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server stopped", "error", err)
+			stop()
+		}
+	}()
 	slog.Info("broker ready")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
-		slog.Error("server stopped", "error", err)
+	<-shutdown.Done()
+	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	server.Shutdown(ctx)
+	b.mu.Lock()
+	for _, conn := range b.active {
+		conn.Close()
+	}
+	b.mu.Unlock()
+	done := make(chan struct{})
+	go func() { b.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		slog.Warn("timed out waiting for agent disconnects")
 	}
 }

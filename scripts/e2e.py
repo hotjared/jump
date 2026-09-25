@@ -80,17 +80,24 @@ def main():
                 "d=s.scalar(select(Device).limit(1));"
                 "print(json.dumps({'count':s.scalar(select(func.count(Device.id))),"
                 "'online':d.online if d else False,"
+                "'last_seen':d.last_seen_at.isoformat() if d and d.last_seen_at else None,"
                 "'revision':s.execute(text('select version_num from alembic_version')).scalar()}))"
             )
             return json.loads(dc("exec", "-T", "jump", "python", "-c", script))
 
         agent = None
+        agent_log = None
         try:
             dc("up", "-d", "--build")
             wait_until(lambda: urlopen("http://localhost:8000/health", timeout=3).status == 200)
             page = urlopen("http://localhost:8000/", timeout=3).read()
             assert b"<title>Jump</title>" in page
-            assert db_status() == {"count": 0, "online": False, "revision": "0001"}
+            assert db_status() == {
+                "count": 0,
+                "online": False,
+                "last_seen": None,
+                "revision": "0001",
+            }
 
             script = (
                 "from jump.db import SessionLocal;"
@@ -118,22 +125,31 @@ def main():
                 [str(binary), "enroll", "--server", "http://localhost:8080", "--token", token],
                 env=agent_env,
             )
+            agent_log = (temp / "agent.log").open("w+")
             agent = subprocess.Popen(
                 [str(binary), "run"],
                 cwd=ROOT,
                 env=agent_env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=agent_log,
+                stderr=agent_log,
             )
             wait_until(lambda: db_status()["count"] == 1 and db_status()["online"])
+            first_seen = db_status()["last_seen"]
             time.sleep(22)
-            assert db_status()["online"]  # Heartbeat across the normal interval.
+            later = db_status()
+            assert later["online"] and later["last_seen"] > first_seen
             dc("restart", "jump", "broker")
             wait_until(lambda: db_status()["count"] == 1 and db_status()["online"])
             logs = dc("logs", "--no-color", "jump", "broker")
+            agent_log.flush()
+            agent_log.seek(0)
+            logs += agent_log.read()
             for secret in secrets_map.values():
                 assert secret not in logs, "secret appeared in container logs"
-            assert "Traceback" not in logs and "panic:" not in logs
+            for marker in ("Traceback", "panic:", "migration error", '"level":"ERROR"'):
+                assert marker not in logs, f"unexpected log marker: {marker}"
+            warnings = [line for line in logs.splitlines() if '"level":"WARN"' in line]
+            print(f"Structured warning lines during restart: {len(warnings)}")
             print("Compose, migration, UI, enrollment, heartbeat, restart and persistence: passed")
         finally:
             if agent:
@@ -142,6 +158,8 @@ def main():
                     agent.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     agent.kill()
+            if agent_log:
+                agent_log.close()
             dc("down", "-v", "--remove-orphans")
 
 
