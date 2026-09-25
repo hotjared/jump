@@ -11,7 +11,17 @@ from sqlalchemy import select
 
 from jump.db import get_db
 from jump.main import app
-from jump.models import AgentIdentity, AuditEvent, Device, Role, User
+from jump.models import (
+    AgentIdentity,
+    AuditEvent,
+    Credential,
+    Device,
+    Group,
+    Role,
+    Tag,
+    User,
+    now,
+)
 
 ORIGIN = "http://localhost:8000"
 BROKER = {"Authorization": "Bearer test-broker-token-at-least-32-characters"}
@@ -229,3 +239,97 @@ def test_failed_broker_disconnect_preserves_revocation(client, db, monkeypatch):
         db.scalar(select(AuditEvent).where(AuditEvent.event_type == "agent_identity_revoked"))
         is not None
     )
+
+
+
+def test_device_delete_permissions_and_preconditions(client, db):
+    device = Device(hostname="delete-me", os_family="linux", capabilities=[], addresses=[])
+    db.add(device)
+    db.flush()
+    identity = AgentIdentity(device_id=device.id, public_key=b"d" * 32)
+    db.add(identity)
+    db.commit()
+    url = f"/api/devices/{device.id}"
+
+    assert client.delete(url, headers=write_headers()).status_code == 401
+
+    user = as_user(client, db, Role.USER)
+    assert client.delete(url, headers=write_headers()).status_code == 403
+
+    user.role = Role.ADMIN
+    db.commit()
+    assert client.delete(url).status_code == 403
+
+    response = client.delete(url, headers=write_headers())
+    assert response.status_code == 409
+    assert "Revoke" in response.json()["detail"]
+    db.refresh(identity)
+    assert identity.revoked_at is None
+    assert db.get(Device, device.id) is not None
+
+    identity.revoked_at = now()
+    device.online = True
+    device.connection_id = "still-online"
+    db.commit()
+    response = client.delete(url, headers=write_headers())
+    assert response.status_code == 409
+    assert "offline" in response.json()["detail"].lower()
+    assert db.get(Device, device.id) is not None
+
+    assert client.delete(f"/api/devices/{uuid.uuid4()}", headers=write_headers()).status_code == 404
+
+
+def test_revoked_offline_device_delete_cascades_owned_data_and_preserves_shared_data(client, db):
+    user = as_user(client, db)
+    group = Group(name="Shared group")
+    tag = Tag(name="Shared tag")
+    db.add_all([group, tag])
+    db.flush()
+
+    device = Device(
+        hostname="old-host",
+        display_name="Old Host",
+        os_family="linux",
+        capabilities=[],
+        addresses=[],
+        group_id=group.id,
+        online=False,
+    )
+    device.tags = [tag]
+    db.add(device)
+    db.flush()
+    identity = AgentIdentity(device_id=device.id, public_key=b"k" * 32, revoked_at=now())
+    credential = Credential(
+        device_id=device.id,
+        label="Local admin",
+        kind="password",
+        username="administrator",
+        ciphertext=b"ciphertext",
+        nonce=b"nonce",
+    )
+    db.add_all([identity, credential])
+    db.commit()
+
+    device_id = device.id
+    device_uuid = device.device_uuid
+    response = client.delete(f"/api/devices/{device_id}", headers=write_headers())
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+    db.expire_all()
+    assert db.get(Device, device_id) is None
+    assert db.scalar(select(AgentIdentity).where(AgentIdentity.device_id == device_id)) is None
+    assert db.scalar(select(Credential).where(Credential.device_id == device_id)) is None
+    assert db.get(Group, group.id) is not None
+    assert db.get(Tag, tag.id) is not None
+
+    event = db.scalar(select(AuditEvent).where(AuditEvent.event_type == "device_deleted"))
+    assert event is not None
+    assert event.actor_user_id == user.id
+    assert event.device_id is None
+    assert event.detail["device_id"] == str(device_id)
+    assert event.detail["device_uuid"] == str(device_uuid)
+    assert event.detail["hostname"] == "old-host"
+    assert event.detail["display_name"] == "Old Host"
+    assert event.request_id
+    assert client.get(f"/api/internal/identities/{device_id}", headers=BROKER).status_code == 404
