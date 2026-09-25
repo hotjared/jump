@@ -162,7 +162,7 @@ def test_revoke_identity_disconnects_and_prevents_reconnect(client, db, monkeypa
     user.role = Role.ADMIN
     db.commit()
     assert client.post(admin_url + "/revoke").status_code == 403
-    response = client.post(url + "/revoke", headers=write_headers())
+    response = client.post(admin_url + "/revoke", headers=write_headers())
     assert response.status_code == 200, response.text
     assert response.json()["identity_state"] == "revoked"
     assert response.json()["online"] is False
