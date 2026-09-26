@@ -224,7 +224,6 @@ func TestRevocationClosesActiveConnectionAndRejectsReconnect(t *testing.T) {
 	response.Body.Close()
 }
 
-
 func TestDeletedIdentityIsRejected(t *testing.T) {
 	public, private, _ := ed25519.GenerateKey(rand.Reader)
 	deviceID := "bd0b50e5-4cad-4fcf-9666-3bf2f8e43b4c"
