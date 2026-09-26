@@ -4,10 +4,20 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { SshSession } from './ssh-session'
 
+const MIN_COLUMNS = 20
+const MAX_COLUMNS = 500
+const MIN_ROWS = 5
+const MAX_ROWS = 200
+
 function SessionTerminal({ session, visible }: { session: SshSession; visible: boolean }) {
   const node = useRef<HTMLDivElement>(null)
   const fit = useRef<FitAddon | null>(null)
   const term = useRef<Terminal | null>(null)
+  const visibleRef = useRef(visible)
+  const frame = useRef<number | null>(null)
+  const lastSize = useRef<{ columns: number; rows: number } | null>(null)
+
+  visibleRef.current = visible
 
   useEffect(() => {
     if (!node.current) return
@@ -18,23 +28,55 @@ function SessionTerminal({ session, visible }: { session: SshSession; visible: b
     term.current = terminal; fit.current = addon
     const detach = session.attach(data => terminal.write(data))
     const input = terminal.onData(data => session.sendData(data))
-    const observer = new ResizeObserver(() => {
-      if (!node.current?.getClientRects().length) return
-      addon.fit()
-      session.resize(terminal.cols, terminal.rows)
-    })
+
+    const scheduleFit = () => {
+      if (!visibleRef.current || frame.current !== null) return
+      frame.current = -1
+      const id = requestAnimationFrame(() => {
+        frame.current = null
+        if (!visibleRef.current || !node.current?.getClientRects().length) return
+        addon.fit()
+        const columns = terminal.cols
+        const rows = terminal.rows
+        if (columns < MIN_COLUMNS || columns > MAX_COLUMNS || rows < MIN_ROWS || rows > MAX_ROWS) return
+        if (lastSize.current?.columns === columns && lastSize.current.rows === rows) return
+        lastSize.current = { columns, rows }
+        session.resize(columns, rows)
+      })
+      if (frame.current !== null) frame.current = id
+    }
+
+    const observer = new ResizeObserver(scheduleFit)
     observer.observe(node.current)
-    return () => { observer.disconnect(); input.dispose(); detach(); terminal.dispose(); term.current = null; fit.current = null }
+    scheduleFit()
+
+    return () => {
+      observer.disconnect()
+      if (frame.current !== null) cancelAnimationFrame(frame.current)
+      frame.current = null
+      input.dispose()
+      detach()
+      terminal.dispose()
+      term.current = null
+      fit.current = null
+    }
   }, [session])
 
   useEffect(() => {
-    if (!visible || !term.current) return
-    // A hidden tab has zero dimensions; fit again when it becomes visible.
-    const frame = requestAnimationFrame(() => {
+    if (!visible) return
+    const id = requestAnimationFrame(() => {
+      if (!visibleRef.current || !term.current || !node.current?.getClientRects().length) return
       fit.current?.fit()
-      if (term.current) { session.resize(term.current.cols, term.current.rows); term.current.focus() }
+      const columns = term.current.cols
+      const rows = term.current.rows
+      if (columns >= MIN_COLUMNS && columns <= MAX_COLUMNS && rows >= MIN_ROWS && rows <= MAX_ROWS &&
+        (lastSize.current?.columns !== columns || lastSize.current.rows !== rows)) {
+        lastSize.current = { columns, rows }
+        session.resize(columns, rows)
+      }
+      term.current.focus()
     })
-    return () => cancelAnimationFrame(frame)
+    return () => cancelAnimationFrame(id)
   }, [session, visible])
 
   return <div className="workspace-terminal" ref={node} aria-label={`${session.name} SSH terminal`} />
