@@ -134,6 +134,12 @@ def test_credential_creation_requires_admin_and_never_reads_back_secret(client, 
     user.role = Role.ADMIN
     db.commit()
     assert client.post(path, json=payload).status_code == 403
+    assert (
+        client.post(
+            path, headers=write_headers(), json={**payload, "secret": "é" * 9000}
+        ).status_code
+        == 400
+    )
     result = client.post(path, headers=write_headers(), json=payload)
     assert result.status_code == 201
     listed = client.get(path)

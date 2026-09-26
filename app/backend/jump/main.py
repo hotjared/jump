@@ -670,6 +670,9 @@ def add_credential(
         raise HTTPException(404)
     if device.os_family != "linux":
         raise HTTPException(400, "SSH credentials require a Linux device")
+    secret_bytes = body.secret.encode()
+    if len(secret_bytes) > 16384:
+        raise HTTPException(400, "Credential is too large")
     try:
         item = create_credential(
             db,
@@ -678,7 +681,7 @@ def add_credential(
             label=body.label,
             kind=body.kind,
             username=body.username,
-            secret=body.secret.encode(),
+            secret=secret_bytes,
         )
     except ValueError as exc:
         raise HTTPException(400, "Invalid credential") from exc
