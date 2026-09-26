@@ -23,15 +23,22 @@ func TestInternalSessionRoutesOnlyItsOwnFrames(t *testing.T) {
 		for {
 			var frame message
 			if conn.ReadJSON(&frame) != nil { return }
-			if frame.Type == "session_open" {
-				_ = b.agentFrame(conn, message{Version: 1, Type: "session_opened", SessionID: frame.SessionID, Fingerprint: "SHA256:test"})
-			}
+			_ = b.agentFrame(conn, frame)
 		}
 	}))
 	defer agentServer.Close()
 	agent, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(agentServer.URL, "http"), nil)
 	if err != nil { t.Fatal(err) }
 	defer agent.Close()
+	go func() {
+		for {
+			var frame message
+			if agent.ReadJSON(&frame) != nil { return }
+			if frame.Type == "session_open" {
+				_ = agent.WriteJSON(message{Version: 1, Type: "session_opened", SessionID: frame.SessionID, Fingerprint: "SHA256:test"})
+			}
+		}
+	}()
 	control := http.NewServeMux()
 	control.HandleFunc("GET /internal/sessions/{id}", b.internalSession)
 	server := httptest.NewServer(control)

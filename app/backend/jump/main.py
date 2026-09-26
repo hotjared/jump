@@ -997,8 +997,10 @@ async def browser_ssh_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
                 )
             )
             db.commit()
-    except (WebSocketDisconnect, ConnectionClosed):
-        reason = "device_disconnected" if session.state == "connecting" else "session_closed"
+    except WebSocketDisconnect:
+        reason = "session_closed"
+    except ConnectionClosed:
+        reason = "device_disconnected"
     except (TimeoutError, OSError):
         reason = "timeout" if session.state == "connecting" else "agent_unavailable"
     except (RuntimeError, ValueError, KeyError, json.JSONDecodeError, binascii.Error) as exc:
