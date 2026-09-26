@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
@@ -39,8 +38,7 @@ func TestStreamIsolationAndResizeValidation(t *testing.T) {
 	id := "4af3210f-5430-4db0-85b2-8a8560d23420"
 	if m.handle(message{Type: "session_resize", SessionID: "invalid", Rows: 24, Columns: 80}) { t.Fatal("invalid id accepted") }
 	if !m.handle(message{Type: "session_close", SessionID: id}) { t.Fatal("late close rejected") }
-	ctx, cancel := context.WithCancel(context.Background())
-	stream := &sshStream{cancel: cancel, closed: make(chan struct{})}
+	stream := &sshStream{cancel: func() {}, closed: make(chan struct{})}
 	m.streams[id] = stream
 	if m.handle(message{Type: "session_resize", SessionID: id, Rows: 0, Columns: 80}) { t.Fatal("invalid resize accepted") }
 	if m.handle(message{Type: "session_data", SessionID: id, Data: "!!!"}) { t.Fatal("malformed data accepted") }

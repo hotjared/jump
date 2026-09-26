@@ -71,10 +71,23 @@ def create(client, device, cred):
 def test_session_authorization_validation_and_host_trust(client, db):
     device = seeded(db)
     assert client.get(f"/api/devices/{device.id}/credentials").status_code == 401
+    assert create(client, device, str(uuid.uuid4())).status_code == 403  # CSRF guard
     user = as_user(client, db)
     cred = credential(client, db, device)
     other = seeded(db)
     assert create(client, other, cred).status_code == 400
+    wrong_kind = Credential(
+        device_id=device.id,
+        label="Windows only",
+        kind="windows_password",
+        username="root",
+        ciphertext=b"not a secret",
+        nonce=b"0" * 12,
+        key_version=1,
+    )
+    db.add(wrong_kind)
+    db.commit()
+    assert create(client, device, str(wrong_kind.id)).status_code == 400
     device.online = False
     db.commit()
     assert create(client, device, cred).status_code == 409
@@ -104,6 +117,27 @@ def test_session_authorization_validation_and_host_trust(client, db):
     events = [e.event_type for e in db.scalars(select(AuditEvent))]
     assert events.count("ssh_host_key_trusted") == 1
     assert "ssh_session_ended" in events
+
+
+def test_credential_creation_requires_admin_and_never_reads_back_secret(client, db):
+    device = seeded(db)
+    user = as_user(client, db, Role.USER)
+    path = f"/api/devices/{device.id}/credentials"
+    payload = {
+        "label": "Deploy key",
+        "username": "deploy",
+        "kind": "linux_ssh_key",
+        "secret": "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
+    }
+    assert client.post(path, headers=write_headers(), json=payload).status_code == 403
+    user.role = Role.ADMIN
+    db.commit()
+    assert client.post(path, json=payload).status_code == 403
+    result = client.post(path, headers=write_headers(), json=payload)
+    assert result.status_code == 201
+    listed = client.get(path)
+    assert listed.status_code == 200 and len(listed.json()) == 1
+    assert "PRIVATE KEY" not in result.text + listed.text
 
 
 def test_reset_is_admin_only_and_requires_csrf(client, db):

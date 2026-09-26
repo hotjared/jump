@@ -51,22 +51,22 @@ type message struct {
 
 type sessionRoute struct {
 	deviceID string
-	agent *websocket.Conn
-	frames chan message
-	closed chan struct{}
-	once sync.Once
+	agent    *websocket.Conn
+	frames   chan message
+	closed   chan struct{}
+	once     sync.Once
 }
 
 type broker struct {
-	api    string
-	token  string
-	client *http.Client
-	mu     sync.Mutex
-	active map[string]*websocket.Conn
-	writers sync.Map // *websocket.Conn -> *sync.Mutex
+	api      string
+	token    string
+	client   *http.Client
+	mu       sync.Mutex
+	active   map[string]*websocket.Conn
+	writers  sync.Map // *websocket.Conn -> *sync.Mutex
 	sessions map[string]*sessionRoute
-	limits map[string]window
-	wg     sync.WaitGroup
+	limits   map[string]window
+	wg       sync.WaitGroup
 }
 
 func (b *broker) write(conn *websocket.Conn, value message) error {
@@ -105,7 +105,7 @@ func (b *broker) agentFrame(conn *websocket.Conn, msg message) bool {
 		return true
 	default:
 		b.closeRoute(msg.SessionID, route)
-		return false
+		return true // close only the slow session; keep presence and other streams alive
 	}
 }
 
@@ -131,7 +131,9 @@ func (b *broker) internalSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn, err := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(w, r, nil)
-	if err != nil { return }
+	if err != nil {
+		return
+	}
 	defer conn.Close()
 	conn.SetReadLimit(maxMessage)
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -147,14 +149,18 @@ func (b *broker) internalSession(w http.ResponseWriter, r *http.Request) {
 		b.mu.Unlock()
 		return
 	}
-	if b.sessions == nil { b.sessions = make(map[string]*sessionRoute) }
+	if b.sessions == nil {
+		b.sessions = make(map[string]*sessionRoute)
+	}
 	b.sessions[id] = route
 	b.mu.Unlock()
 	defer func() {
 		b.closeRoute(id, route)
 		_ = b.write(agent, message{Version: 1, Type: "session_close", SessionID: id})
 	}()
-	if b.write(agent, open) != nil { return }
+	if b.write(agent, open) != nil {
+		return
+	}
 	open.Secret = ""
 	conn.SetReadDeadline(time.Time{})
 	readDone := make(chan struct{})
@@ -162,13 +168,17 @@ func (b *broker) internalSession(w http.ResponseWriter, r *http.Request) {
 		defer close(readDone)
 		for {
 			var msg message
-			if conn.ReadJSON(&msg) != nil { return }
+			if conn.ReadJSON(&msg) != nil {
+				return
+			}
 			if msg.Version != 1 || msg.SessionID != id || len(msg.Data) > 11000 ||
 				(msg.Type != "session_data" && msg.Type != "session_resize" && msg.Type != "session_close") ||
 				(msg.Type == "session_resize" && (msg.Columns < 20 || msg.Columns > 500 || msg.Rows < 5 || msg.Rows > 200)) {
 				return
 			}
-			if b.write(agent, msg) != nil || msg.Type == "session_close" { return }
+			if b.write(agent, msg) != nil || msg.Type == "session_close" {
+				return
+			}
 		}
 	}()
 	for {
@@ -178,8 +188,10 @@ func (b *broker) internalSession(w http.ResponseWriter, r *http.Request) {
 		case <-route.closed:
 			return
 		case msg := <-route.frames:
-			conn.SetWriteDeadline(time.Now().Add(5*time.Second))
-			if conn.WriteJSON(msg) != nil || msg.Type == "session_close" || msg.Type == "session_error" { return }
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if conn.WriteJSON(msg) != nil || msg.Type == "session_close" || msg.Type == "session_error" {
+				return
+			}
 		}
 	}
 }
@@ -355,10 +367,14 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 		}
 		var routes []*sessionRoute
 		for _, route := range b.sessions {
-			if route.agent == conn { routes = append(routes, route) }
+			if route.agent == conn {
+				routes = append(routes, route)
+			}
 		}
 		b.mu.Unlock()
-		for _, route := range routes { b.closeRouteForAgent(route) }
+		for _, route := range routes {
+			b.closeRouteForAgent(route)
+		}
 		b.writers.Delete(conn)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -384,9 +400,13 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 			if conn.ReadJSON(&msg) != nil {
 				return
 			}
-			if msg.Version != 1 { return }
+			if msg.Version != 1 {
+				return
+			}
 			if msg.Type != "heartbeat" {
-				if !b.agentFrame(conn, msg) { return }
+				if !b.agentFrame(conn, msg) {
+					return
+				}
 				continue
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
