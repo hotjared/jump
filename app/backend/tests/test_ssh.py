@@ -29,7 +29,7 @@ def seeded(db):
         os_version="Ubuntu",
         architecture="amd64",
         agent_version="test",
-        capabilities=["ssh"],
+        capabilities=["ssh", "ssh_terminal_v1"],
         addresses=[],
         online=True,
         connection_id=str(uuid.uuid4()),
@@ -100,7 +100,7 @@ def test_session_authorization_validation_and_host_trust(client, db):
     device.capabilities = []
     db.commit()
     assert create(client, device, cred).status_code == 409
-    device.capabilities = ["ssh"]
+    device.capabilities = ["ssh", "ssh_terminal_v1"]
     db.commit()
     response = create(client, device, cred)
     assert response.status_code == 201, response.text
@@ -118,6 +118,36 @@ def test_session_authorization_validation_and_host_trust(client, db):
     events = [e.event_type for e in db.scalars(select(AuditEvent))]
     assert events.count("ssh_host_key_trusted") == 1
     assert "ssh_session_ended" in events
+
+
+def test_older_agent_cannot_create_or_attach_browser_ssh(client, db, monkeypatch):
+    device = seeded(db)
+    as_user(client, db)
+    cred = credential(client, db, device)
+    device.capabilities = ["ssh"]
+    db.commit()
+    denied = create(client, device, cred)
+    assert denied.status_code == 409
+    assert "Update the Jump agent" in denied.json()["detail"]
+    assert db.scalar(select(RemoteSession)) is None
+
+    # An agent can reconnect with older metadata after a session is created.
+    device.capabilities = ["ssh", "ssh_terminal_v1"]
+    db.commit()
+    sid = create(client, device, cred).json()["id"]
+    device.capabilities = ["ssh"]
+    db.commit()
+
+    async def unexpected_connect(*args, **kwargs):
+        pytest.fail("Old agent reached the broker session_open path")
+
+    monkeypatch.setattr("jump.main.ws_connect", unexpected_connect)
+    with client.websocket_connect(
+        f"/ws/sessions/{sid}", headers={"Host": "localhost", "Origin": ORIGIN}
+    ) as ws:
+        closed = ws.receive_json()
+        assert closed["state"] == "closed" and closed["code"] == "unsupported_agent"
+    assert db.get(RemoteSession, uuid.UUID(sid)).state == "failed"
 
 
 def test_credential_creation_requires_admin_and_never_reads_back_secret(client, db):
