@@ -17,13 +17,13 @@ func runSystemctl(args ...string) error {
 }
 
 var (
-	linuxEffectiveUID    = os.Geteuid
-	linuxCopyExecutable  = copyExecutable
-	linuxWriteFile       = os.WriteFile
-	linuxRemoveFile      = os.Remove
-	linuxSystemctl       = runSystemctl
-	linuxBinaryTarget    = linuxInstallPath
-	linuxUnitTarget      = linuxUnitPath
+	linuxEffectiveUID   = os.Geteuid
+	linuxCopyExecutable = copyExecutable
+	linuxWriteFile      = os.WriteFile
+	linuxRemoveFile     = os.Remove
+	linuxSystemctl      = runSystemctl
+	linuxBinaryTarget   = linuxInstallPath
+	linuxUnitTarget     = linuxUnitPath
 )
 
 func installService() error {
