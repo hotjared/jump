@@ -4,6 +4,7 @@ import binascii
 import hmac
 import json
 import logging
+import re
 import secrets
 import time
 import uuid
@@ -778,7 +779,9 @@ def finish_ssh_session(db: Session, session: RemoteSession, reason: str | None =
 
 
 def trust_ssh_host_key(db: Session, session: RemoteSession, fingerprint: str) -> bool:
-    if not fingerprint.startswith("SHA256:") or len(fingerprint) > 128:
+    if not isinstance(fingerprint, str) or not re.fullmatch(
+        r"SHA256:[A-Za-z0-9+/]{43}", fingerprint
+    ):
         return False
     device = db.scalar(select(Device).where(Device.id == session.device_id).with_for_update())
     if (
@@ -1002,7 +1005,16 @@ async def browser_ssh_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
         reason = "device_disconnected"
     except (TimeoutError, OSError):
         reason = "timeout" if session.state == "connecting" else "agent_unavailable"
-    except (RuntimeError, ValueError, KeyError, json.JSONDecodeError, binascii.Error) as exc:
+    except (
+        RuntimeError,
+        ValueError,
+        TypeError,
+        AttributeError,
+        KeyError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        binascii.Error,
+    ) as exc:
         reason = str(exc) if str(exc) in SSH_ERRORS else "agent_unavailable"
     finally:
         if backend:

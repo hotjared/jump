@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import uuid
@@ -106,11 +107,11 @@ def test_session_authorization_validation_and_host_trust(client, db):
     assert "super-private-password" not in response.text
     session = db.get(RemoteSession, uuid.UUID(response.json()["id"]))
     assert session.user_id == user.id and session.credential_id == uuid.UUID(cred)
-    assert trust_ssh_host_key(db, session, "SHA256:first")
-    assert device.ssh_host_key == "SHA256:first"
-    assert trust_ssh_host_key(db, session, "SHA256:first")
-    assert not trust_ssh_host_key(db, session, "SHA256:changed")
-    assert device.ssh_host_key == "SHA256:first"
+    assert trust_ssh_host_key(db, session, "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    assert device.ssh_host_key == "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assert trust_ssh_host_key(db, session, "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    assert not trust_ssh_host_key(db, session, "SHA256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+    assert device.ssh_host_key == "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     session.state = "active"
     finish_ssh_session(db, session, "idle_timeout")
     assert session.state == "closed" and session.closed_at
@@ -146,7 +147,7 @@ def test_credential_creation_requires_admin_and_never_reads_back_secret(client, 
 
 def test_reset_is_admin_only_and_requires_csrf(client, db):
     device = seeded(db)
-    device.ssh_host_key = "SHA256:old"
+    device.ssh_host_key = "SHA256:ccccccccccccccccccccccccccccccccccccccccccc"
     db.commit()
     user = as_user(client, db, Role.USER)
     path = f"/api/devices/{device.id}/ssh-host-key/reset"
@@ -220,7 +221,11 @@ def test_browser_gateway_opens_only_selected_credential(client, db, monkeypatch)
         async def recv(self):
             if len(sent) == 1:
                 return json.dumps(
-                    {"type": "session_opened", "session_id": sid, "fingerprint": "SHA256:first"}
+                    {
+                        "type": "session_opened",
+                        "session_id": sid,
+                        "fingerprint": "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    }
                 )
             return json.dumps({"type": "session_close", "session_id": sid})
 
@@ -240,5 +245,48 @@ def test_browser_gateway_opens_only_selected_credential(client, db, monkeypatch)
     assert base64.b64decode(sent[0]["secret"]) == b"super-private-password"
     session = db.get(RemoteSession, uuid.UUID(sid))
     assert session.state == "closed"
-    assert device.ssh_host_key == "SHA256:first"
+    assert device.ssh_host_key == "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     assert db.scalar(select(AuditEvent).where(AuditEvent.event_type == "ssh_session_started"))
+
+
+def test_idle_session_closes_and_is_audited(client, db, monkeypatch):
+    device = seeded(db)
+    as_user(client, db)
+    cred = credential(client, db, device)
+    sid = create(client, device, cred).json()["id"]
+
+    class QuietBroker:
+        calls = 0
+
+        async def send(self, frame):
+            pass
+
+        async def recv(self):
+            self.calls += 1
+            if self.calls == 1:
+                return json.dumps(
+                    {
+                        "type": "session_opened",
+                        "session_id": sid,
+                        "fingerprint": "SHA256:" + "a" * 43,
+                    }
+                )
+            await asyncio.sleep(30)
+
+        async def close(self):
+            pass
+
+    async def fake_connect(*args, **kwargs):
+        return QuietBroker()
+
+    monkeypatch.setattr("jump.main.ws_connect", fake_connect)
+    monkeypatch.setattr("jump.main.cfg.ssh_idle_seconds", 0)
+    with client.websocket_connect(
+        f"/ws/sessions/{sid}", headers={"Host": "localhost", "Origin": ORIGIN}
+    ) as ws:
+        assert ws.receive_json()["state"] == "active"
+        closed = ws.receive_json()
+        assert closed["code"] == "idle_timeout" and closed["state"] == "closed"
+    session = db.get(RemoteSession, uuid.UUID(sid))
+    assert session.state == "closed"
+    assert db.scalar(select(AuditEvent).where(AuditEvent.event_type == "ssh_session_idle_timeout"))
