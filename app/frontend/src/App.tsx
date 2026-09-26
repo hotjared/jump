@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { agentFilename, downloadFor, enrollmentCommand, type AgentDownloads, type Platform } from './agent-downloads'
 import { canDeleteDevice, deletionConfirmed, deletionName, deviceDeleteMethod } from './device-actions'
-import TerminalPanel from './TerminalPanel'
+const TerminalPanel = lazy(() => import('./TerminalPanel'))
 
 type Named = { id: string; name: string }
 type Device = {
@@ -198,7 +198,7 @@ export default function App() {
             }
           }}>Delete device</button>}
         </section>
-      </div> : tab === 'Terminal' ? <TerminalPanel key={device.id} device={device} admin={user.role === 'admin'} mutate={mutate} /> : <div className="placeholder compact"><span>◇</span><h2>{tab} is not available yet</h2><p>Connection and action features arrive in a later phase.</p></div>}
+      </div> : tab === 'Terminal' ? <Suspense fallback={<div className="placeholder compact">Loading terminal…</div>}><TerminalPanel key={device.id} device={device} admin={user.role === 'admin'} mutate={mutate} /></Suspense> : <div className="placeholder compact"><span>◇</span><h2>{tab} is not available yet</h2><p>Connection and action features arrive in a later phase.</p></div>}
     </aside></div>}
     {enrolling && <div className="overlay" onClick={() => setEnrolling(false)}><div className="modal" onClick={e => e.stopPropagation()}><button className="close" aria-label="Close" onClick={() => setEnrolling(false)}>×</button><p className="eyebrow">NEW ENDPOINT</p><h2>Enroll a device</h2>
       {!issued && <><p>Choose the operating system, download its native agent, then generate a single-use token.</p><div className="platform">{(['linux','windows'] as Platform[]).map(v => <button key={v} type="button" aria-pressed={platform === v} className={platform === v ? 'chosen' : ''} onClick={() => setPlatform(v)}>{v === 'windows' ? '⊞  Windows amd64' : '⌘  Linux amd64'}</button>)}</div></>}
