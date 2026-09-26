@@ -48,7 +48,7 @@ jobs:
         with:
           go-version: "1.27"
           cache: false
-      - run: go mod tidy && git diff -- go.mod go.sum && test -z "$(git status --porcelain)" && go test ./... && go vet ./... && go build ./...
+      - run: go mod tidy && test -z "$(git status --porcelain)" && go test ./... && go test -race ./... && go vet ./... && go build ./...
         working-directory: ${{ matrix.component }}
       - run: gofmt -d . && test -z "$(gofmt -l .)"
         working-directory: ${{ matrix.component }}

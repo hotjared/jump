@@ -25,7 +25,7 @@ type sshStream struct {
 }
 
 type sshMux struct {
-	conn    *websocket.Conn
+	conn *websocket.Conn
 	// address is set only by in-process tests; production always uses localhost:22.
 	address string
 	writeMu sync.Mutex
@@ -176,7 +176,11 @@ func (m *sshMux) open(msg message) {
 		config.Auth = nil
 		if err != nil {
 			_ = netConn.Close()
-			m.fail(msg.SessionID, stream, sshFailure(err))
+			if errors.Is(handshakeCtx.Err(), context.DeadlineExceeded) {
+				m.fail(msg.SessionID, stream, "timeout")
+			} else {
+				m.fail(msg.SessionID, stream, sshFailure(err))
+			}
 			return
 		}
 		client := ssh.NewClient(transport, channels, requests)

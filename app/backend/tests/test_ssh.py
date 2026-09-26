@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from starlette.websockets import WebSocketDisconnect
-from test_api import ORIGIN, as_user, write_headers
+from test_api import BROKER, ORIGIN, as_user, write_headers
 
 from jump.db import get_db
 from jump.main import app, finish_ssh_session, trust_ssh_host_key
@@ -157,6 +157,19 @@ def test_reset_is_admin_only_and_requires_csrf(client, db):
     assert client.post(path, headers=write_headers()).status_code == 200
     assert device.ssh_host_key is None
     assert db.scalar(select(AuditEvent).where(AuditEvent.event_type == "ssh_host_key_reset"))
+
+
+def test_reconcile_fails_orphaned_sessions_with_audit(client, db):
+    device = seeded(db)
+    as_user(client, db)
+    cred = credential(client, db, device)
+    sid = create(client, device, cred).json()["id"]
+    session = db.get(RemoteSession, uuid.UUID(sid))
+    session.state = "active"
+    db.commit()
+    assert client.post("/api/internal/reconcile", headers=BROKER).status_code == 200
+    assert session.state == "failed" and session.failure_reason == "service_restarted"
+    assert db.scalar(select(AuditEvent).where(AuditEvent.event_type == "ssh_session_failed"))
 
 
 def test_session_attach_requires_ownership_and_same_origin(client, db):

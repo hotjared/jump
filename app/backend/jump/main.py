@@ -618,11 +618,10 @@ def reconcile(db: Session = Depends(get_db)):
     db.execute(
         update(Device).where(Device.online.is_(True)).values(online=False, connection_id=None)
     )
-    db.execute(
-        update(RemoteSession)
-        .where(RemoteSession.state.in_(["connecting", "active"]))
-        .values(state="failed", closed_at=now(), failure_reason="service_restarted")
-    )
+    for session in db.scalars(
+        select(RemoteSession).where(RemoteSession.state.in_(["connecting", "active"]))
+    ):
+        finish_ssh_session(db, session, "service_restarted")
     db.commit()
     return {"ok": True}
 
