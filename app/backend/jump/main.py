@@ -635,6 +635,7 @@ SSH_ERRORS = {
     "host_key_mismatch": "SSH host key changed. An admin must verify and reset it.",
     "device_disconnected": "Device disconnected",
     "agent_unavailable": "Agent unavailable",
+    "unsupported_agent": "Update the Jump agent to enable browser SSH",
     "unsupported_credential": "Unsupported SSH credential",
     "session_expired": "Session expired",
     "idle_timeout": "Session closed after 30 minutes of inactivity",
@@ -737,8 +738,10 @@ def new_ssh_session(
         raise HTTPException(409, "Device is offline")
     if not device.agent_identity or device.agent_identity.revoked_at:
         raise HTTPException(409, "Agent identity is revoked")
-    if device.os_family != "linux" or "ssh" not in device.capabilities:
+    if device.os_family != "linux":
         raise HTTPException(409, "Device does not support SSH")
+    if "ssh_terminal_v1" not in device.capabilities:
+        raise HTTPException(409, "Update the Jump agent to enable browser SSH")
     credential = db.get(Credential, body.credential_id)
     if not credential or credential.device_id != device_id:
         raise HTTPException(400, "Credential does not belong to this device")
@@ -865,6 +868,8 @@ async def browser_ssh_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
             or not credential
         ):
             raise RuntimeError("device_disconnected")
+        if "ssh_terminal_v1" not in device.capabilities:
+            raise RuntimeError("unsupported_agent")
         secret = bytearray(decrypt_for_gateway(credential))
         try:
             address = (
