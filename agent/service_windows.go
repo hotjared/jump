@@ -152,7 +152,6 @@ func runWindowsService() error {
 	return nil
 }
 
-
 func runAgentCommand() error {
 	err := runWindowsService()
 	if errors.Is(err, syscall.Errno(1063)) {
