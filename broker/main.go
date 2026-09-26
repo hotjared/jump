@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -30,23 +31,31 @@ var pingInterval = 25 * time.Second
 var heartbeatTimeout = 65 * time.Second
 
 type message struct {
-	Version      int             `json:"version"`
-	Type         string          `json:"type"`
-	DeviceID     string          `json:"device_id,omitempty"`
-	ConnectionID string          `json:"connection_id,omitempty"`
-	Challenge    string          `json:"challenge,omitempty"`
-	Signature    string          `json:"signature,omitempty"`
-	Metadata     json.RawMessage `json:"metadata,omitempty"`
-	SessionID    string          `json:"session_id,omitempty"`
-	Kind         string          `json:"kind,omitempty"`
-	Username     string          `json:"username,omitempty"`
-	Secret       string          `json:"secret,omitempty"`
-	HostKey      string          `json:"host_key,omitempty"`
-	Fingerprint  string          `json:"fingerprint,omitempty"`
-	Code         string          `json:"code,omitempty"`
-	Data         string          `json:"data,omitempty"`
-	Columns      int             `json:"columns,omitempty"`
-	Rows         int             `json:"rows,omitempty"`
+	Version       int             `json:"version"`
+	Type          string          `json:"type"`
+	DeviceID      string          `json:"device_id,omitempty"`
+	ConnectionID  string          `json:"connection_id,omitempty"`
+	Challenge     string          `json:"challenge,omitempty"`
+	Signature     string          `json:"signature,omitempty"`
+	Metadata      json.RawMessage `json:"metadata,omitempty"`
+	SessionID     string          `json:"session_id,omitempty"`
+	Kind          string          `json:"kind,omitempty"`
+	Username      string          `json:"username,omitempty"`
+	Secret        string          `json:"secret,omitempty"`
+	HostKey       string          `json:"host_key,omitempty"`
+	Fingerprint   string          `json:"fingerprint,omitempty"`
+	Code          string          `json:"code,omitempty"`
+	Data          string          `json:"data,omitempty"`
+	Columns       int             `json:"columns,omitempty"`
+	Rows          int             `json:"rows,omitempty"`
+	OperationID   string          `json:"operation_id,omitempty"`
+	TargetVersion string          `json:"target_version,omitempty"`
+	Platform      string          `json:"platform,omitempty"`
+	Architecture  string          `json:"architecture,omitempty"`
+	DownloadURL   string          `json:"download_url,omitempty"`
+	SHA256        string          `json:"sha256,omitempty"`
+	State         string          `json:"state,omitempty"`
+	Reason        string          `json:"reason,omitempty"`
 }
 
 type sessionRoute struct {
@@ -58,15 +67,19 @@ type sessionRoute struct {
 }
 
 type broker struct {
-	api      string
-	token    string
-	client   *http.Client
-	mu       sync.Mutex
-	active   map[string]*websocket.Conn
-	writers  sync.Map // *websocket.Conn -> *sync.Mutex
-	sessions map[string]*sessionRoute
-	limits   map[string]window
-	wg       sync.WaitGroup
+	api          string
+	token        string
+	client       *http.Client
+	mu           sync.Mutex
+	active       map[string]*websocket.Conn
+	connections  map[string]string
+	capabilities map[string]bool
+	updates      map[string]*websocket.Conn
+	updating     map[string]bool
+	writers      sync.Map // *websocket.Conn -> *sync.Mutex
+	sessions     map[string]*sessionRoute
+	limits       map[string]window
+	wg           sync.WaitGroup
 }
 
 func (b *broker) write(conn *websocket.Conn, value message) error {
@@ -90,6 +103,35 @@ func (b *broker) closeRoute(id string, route *sessionRoute) {
 }
 
 func (b *broker) agentFrame(conn *websocket.Conn, msg message) bool {
+	if msg.Type == "agent_update_status" {
+		if len(msg.OperationID) != 36 || (msg.State != "downloading" && msg.State != "installing" && msg.State != "restarting" && msg.State != "failed") {
+			return false
+		}
+		b.mu.Lock()
+		owner := b.updates[msg.OperationID]
+		var deviceID, connectionID string
+		for id, active := range b.active {
+			if active == conn {
+				deviceID, connectionID = id, b.connections[id]
+				break
+			}
+		}
+		b.mu.Unlock()
+		if owner != conn || deviceID == "" {
+			return true
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = b.call(ctx, "POST", "/api/internal/devices/"+deviceID+"/agent-update-status",
+			map[string]any{"operation_id": msg.OperationID, "connection_id": connectionID, "state": msg.State, "reason": nullableReason(msg.Reason)}, nil)
+		if msg.State == "failed" {
+			b.mu.Lock()
+			delete(b.updating, deviceID)
+			delete(b.updates, msg.OperationID)
+			b.mu.Unlock()
+		}
+		return true
+	}
 	if len(msg.SessionID) != 36 || len(msg.Data) > 11000 ||
 		(msg.Type != "session_opened" && msg.Type != "session_error" && msg.Type != "session_data" && msg.Type != "session_close") {
 		return false
@@ -107,6 +149,104 @@ func (b *broker) agentFrame(conn *websocket.Conn, msg message) bool {
 		b.closeRoute(msg.SessionID, route)
 		return true // close only the slow session; keep presence and other streams alive
 	}
+}
+
+func nullableReason(reason string) any {
+	if reason == "" {
+		return nil
+	}
+	return reason
+}
+
+// The private listener accepts only backend-generated release metadata and
+// delivers to the exact authenticated connection the backend authorized.
+func (b *broker) agentUpdate(w http.ResponseWriter, r *http.Request) {
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+b.token)) != 1 {
+		http.Error(w, "unauthorized", 401)
+		return
+	}
+	if r.Header.Get("Origin") != "" {
+		http.Error(w, "origin forbidden", 403)
+		return
+	}
+	var req struct {
+		OperationID  string `json:"operation_id"`
+		ConnectionID string `json:"connection_id"`
+		Version      string `json:"version"`
+		Platform     string `json:"platform"`
+		Architecture string `json:"architecture"`
+		DownloadURL  string `json:"download_url"`
+		SHA256       string `json:"sha256"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 4096))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&req) != nil || len(req.OperationID) != 36 || len(req.ConnectionID) != 36 || len(req.SHA256) != 64 ||
+		(req.Platform != "linux" && req.Platform != "windows") || req.Architecture != "amd64" || !validUpdateURL(req.Version, req.Platform, req.DownloadURL) {
+		http.Error(w, "invalid update", 400)
+		return
+	}
+	id := r.PathValue("id")
+	b.mu.Lock()
+	conn := b.active[id]
+	busy := false
+	for _, route := range b.sessions {
+		if route.deviceID == id {
+			busy = true
+			break
+		}
+	}
+	if conn == nil || b.connections[id] != req.ConnectionID || !b.capabilities[id] || busy || b.updating[id] {
+		b.mu.Unlock()
+		http.Error(w, "agent unavailable or sessions active", 409)
+		return
+	}
+	if b.updates == nil {
+		b.updates = make(map[string]*websocket.Conn)
+	}
+	if b.updating == nil {
+		b.updating = make(map[string]bool)
+	}
+	b.updating[id] = true
+	b.updates[req.OperationID] = conn
+	b.mu.Unlock()
+	err := b.write(conn, message{Version: 1, Type: "agent_update", OperationID: req.OperationID,
+		TargetVersion: req.Version, Platform: req.Platform, Architecture: req.Architecture,
+		DownloadURL: req.DownloadURL, SHA256: req.SHA256})
+	if err != nil {
+		b.mu.Lock()
+		delete(b.updates, req.OperationID)
+		delete(b.updating, id)
+		b.mu.Unlock()
+		http.Error(w, "agent unavailable", 409)
+		return
+	}
+	w.WriteHeader(204)
+}
+
+func validUpdateURL(version, platform, raw string) bool {
+	if len(version) < 2 || version[0] != 'v' {
+		return false
+	}
+	for _, part := range strings.Split(version[1:], ".") {
+		if part == "" {
+			return false
+		}
+		for _, c := range part {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	if len(strings.Split(version[1:], ".")) != 3 {
+		return false
+	}
+	asset := "jump-agent-linux-amd64"
+	if platform == "windows" {
+		asset = "jump-agent-windows-amd64.exe"
+	}
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && u.Host == "github.com" && u.RawQuery == "" && u.Fragment == "" &&
+		u.Path == "/hotjared/jump/releases/download/"+version+"/"+asset
 }
 
 // Only the backend on the private Compose network can open this authenticated
@@ -145,7 +285,7 @@ func (b *broker) internalSession(w http.ResponseWriter, r *http.Request) {
 	}
 	route := &sessionRoute{deviceID: deviceID, agent: agent, frames: make(chan message, 16), closed: make(chan struct{})}
 	b.mu.Lock()
-	if b.active[deviceID] != agent || b.sessions[id] != nil {
+	if b.active[deviceID] != agent || b.sessions[id] != nil || b.updating[deviceID] {
 		b.mu.Unlock()
 		return
 	}
@@ -340,6 +480,18 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	connectionID := randomID()
+	var authInfo struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if json.Unmarshal(auth.Metadata, &authInfo) != nil {
+		return
+	}
+	updateCapable := false
+	for _, capability := range authInfo.Capabilities {
+		if capability == "agent_update_v1" {
+			updateCapable = true
+		}
+	}
 	// Serialize registration with a revocation disconnect. The API locks the
 	// device row and rejects revoked identities even if the key was fetched
 	// before the admin revoked it.
@@ -354,6 +506,15 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 	}
 	previous := b.active[id]
 	b.active[id] = conn
+	if b.connections == nil {
+		b.connections = make(map[string]string)
+	}
+	if b.capabilities == nil {
+		b.capabilities = make(map[string]bool)
+	}
+	b.connections[id] = connectionID
+	b.capabilities[id] = updateCapable
+	delete(b.updating, id)
 	b.mu.Unlock()
 	if previous != nil {
 		previous.Close()
@@ -364,6 +525,14 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 		b.mu.Lock()
 		if b.active[id] == conn {
 			delete(b.active, id)
+			delete(b.connections, id)
+			delete(b.capabilities, id)
+			delete(b.updating, id)
+		}
+		for operation, owner := range b.updates {
+			if owner == conn {
+				delete(b.updates, operation)
+			}
 		}
 		var routes []*sessionRoute
 		for _, route := range b.sessions {
@@ -522,6 +691,7 @@ func main() {
 	mux.HandleFunc("/connect", b.ws)
 	internalMux := http.NewServeMux()
 	internalMux.HandleFunc("POST /internal/devices/{id}/disconnect", b.disconnect)
+	internalMux.HandleFunc("POST /internal/devices/{id}/agent-update", b.agentUpdate)
 	internalMux.HandleFunc("GET /internal/sessions/{id}", b.internalSession)
 	internalServer := &http.Server{Addr: ":8081", Handler: internalMux, ReadHeaderTimeout: 5 * time.Second}
 	server := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 5 * time.Second}

@@ -37,6 +37,7 @@ from .credentials import create_credential, decrypt_for_gateway
 from .db import get_db
 from .models import (
     AgentIdentity,
+    AgentUpdate,
     AuditEvent,
     Credential,
     Device,
@@ -47,7 +48,7 @@ from .models import (
     User,
     now,
 )
-from .releases import agent_downloads
+from .releases import agent_downloads, newer_release, release_asset, release_number
 from .schemas import (
     CredentialInput,
     DevicePatch,
@@ -150,7 +151,78 @@ def internal(authorization: str = Header(default="")) -> None:
         raise HTTPException(401, "Unauthorized")
 
 
-def serialize_device(device: Device) -> dict:
+UPDATE_ACTIVE = ("pending", "downloading", "installing", "restarting")
+UPDATE_REASONS = {
+    "download_failed",
+    "checksum_mismatch",
+    "install_failed",
+    "rollback_completed",
+    "reconnect_timeout",
+    "agent_unavailable",
+    "service_restarted",
+}
+
+
+def update_output(op: AgentUpdate) -> dict:
+    return {
+        "id": str(op.id),
+        "from_version": op.from_version,
+        "target_version": op.target_version,
+        "state": op.state,
+        "created_at": op.created_at,
+        "started_at": op.started_at,
+        "restarting_at": op.restarting_at,
+        "completed_at": op.completed_at,
+        "failure_reason": op.failure_reason,
+    }
+
+
+def finish_update(db: Session, op: AgentUpdate, reason: str | None = None) -> None:
+    if op.state not in UPDATE_ACTIVE:
+        return
+    op.state = "failed" if reason else "completed"
+    op.failure_reason = reason
+    op.completed_at = now()
+    db.add(
+        AuditEvent(
+            event_type="agent_update_failed" if reason else "agent_update_completed",
+            actor_user_id=op.actor_user_id,
+            device_id=op.device_id,
+            detail={
+                "operation_id": str(op.id),
+                "from_version": op.from_version,
+                "target_version": op.target_version,
+                "reason": reason,
+            },
+        )
+    )
+    db.commit()
+
+
+def latest_update(db: Session, device_id: uuid.UUID) -> AgentUpdate | None:
+    op = db.scalar(
+        select(AgentUpdate)
+        .where(AgentUpdate.device_id == device_id)
+        .order_by(AgentUpdate.created_at.desc(), AgentUpdate.id.desc())
+        .limit(1)
+    )
+    if op and op.state in UPDATE_ACTIVE:
+        started = (
+            op.restarting_at if op.state == "restarting" and op.restarting_at else op.created_at
+        )
+        if now() - started.replace(tzinfo=UTC) > timedelta(minutes=2):
+            finish_update(db, op, "reconnect_timeout")
+    return op
+
+
+def serialize_device(device: Device, db: Session | None = None) -> dict:
+    latest = cfg.jump_agent_version
+    available = (
+        newer_release(device.agent_version, latest)
+        and device.os_family in ("linux", "windows")
+        and device.architecture == "amd64"
+    )
+    op = latest_update(db, device.id) if db else None
     return {
         "id": str(device.id),
         "device_uuid": str(device.device_uuid),
@@ -160,6 +232,13 @@ def serialize_device(device: Device) -> dict:
         "os_version": device.os_version,
         "architecture": device.architecture,
         "agent_version": device.agent_version,
+        "agent_update": {
+            "current_version": device.agent_version,
+            "latest_version": latest if release_number(latest) else None,
+            "update_available": available,
+            "remote_update_supported": "agent_update_v1" in device.capabilities,
+            "update_state": update_output(op) if op else None,
+        },
         "capabilities": device.capabilities,
         "addresses": device.addresses,
         "primary_ip": device.primary_ip,
@@ -222,7 +301,9 @@ def me(request: Request, user: User = Depends(current_user)):
 
 @app.get("/api/devices")
 def devices(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    return [serialize_device(d) for d in db.scalars(select(Device).order_by(Device.hostname)).all()]
+    return [
+        serialize_device(d, db) for d in db.scalars(select(Device).order_by(Device.hostname)).all()
+    ]
 
 
 @app.get("/api/devices/{device_id}")
@@ -230,7 +311,85 @@ def device(device_id: uuid.UUID, user: User = Depends(current_user), db: Session
     item = db.get(Device, device_id)
     if not item:
         raise HTTPException(404)
-    return serialize_device(item)
+    return serialize_device(item, db)
+
+
+@app.post("/api/devices/{device_id}/agent-update", status_code=201)
+def request_agent_update(
+    device_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(admin),
+    db: Session = Depends(get_db),
+):
+    if request.headers.get("content-length", "0") not in ("0", "2"):
+        raise HTTPException(400, "Update target is selected by Jump")
+    device = db.scalar(select(Device).where(Device.id == device_id).with_for_update())
+    if not device:
+        raise HTTPException(404)
+    if not device.online or not device.connection_id:
+        raise HTTPException(409, "Device is offline")
+    if not device.agent_identity or device.agent_identity.revoked_at:
+        raise HTTPException(409, "Agent identity is revoked")
+    if device.os_family not in ("linux", "windows") or device.architecture != "amd64":
+        raise HTTPException(409, "Unsupported agent platform")
+    if "agent_update_v1" not in device.capabilities:
+        raise HTTPException(409, "This agent must be updated manually once")
+    if not newer_release(device.agent_version, cfg.jump_agent_version):
+        raise HTTPException(409, "No newer supported agent release")
+    if latest := latest_update(db, device.id):
+        if latest.state in UPDATE_ACTIVE:
+            raise HTTPException(409, "An agent update is already running")
+    active = db.scalar(
+        select(RemoteSession.id)
+        .where(
+            RemoteSession.device_id == device.id, RemoteSession.state.in_(["connecting", "active"])
+        )
+        .limit(1)
+    )
+    if active:
+        raise HTTPException(409, "Close active sessions before updating this agent")
+    try:
+        asset = release_asset(cfg.jump_agent_version, device.os_family)
+    except (ValueError, httpx.HTTPError) as exc:
+        raise HTTPException(503, "Agent release metadata unavailable") from exc
+    op = AgentUpdate(
+        device_id=device.id,
+        actor_user_id=user.id,
+        from_version=device.agent_version,
+        target_version=cfg.jump_agent_version,
+        connection_id=device.connection_id,
+    )
+    db.add(op)
+    db.flush()
+    db.add(
+        AuditEvent(
+            event_type="agent_update_started",
+            actor_user_id=user.id,
+            device_id=device.id,
+            request_id=request.state.request_id,
+            detail={
+                "operation_id": str(op.id),
+                "from_version": op.from_version,
+                "target_version": op.target_version,
+            },
+        )
+    )
+    db.commit()
+    try:
+        with httpx.Client(timeout=5) as client:
+            response = client.post(
+                f"{cfg.broker_internal_url.rstrip('/')}/internal/devices/{device.id}/agent-update",
+                headers={"Authorization": f"Bearer {cfg.broker_internal_token}"},
+                json={"operation_id": str(op.id), "connection_id": op.connection_id, **asset},
+            )
+            if response.status_code == 409:
+                finish_update(db, op, "agent_unavailable")
+                raise HTTPException(409, "Agent connection changed or sessions are active")
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        finish_update(db, op, "agent_unavailable")
+        raise HTTPException(503, "Could not deliver agent update") from exc
+    return update_output(op)
 
 
 @app.patch("/api/devices/{device_id}")
@@ -572,11 +731,64 @@ def connected(device_id: uuid.UUID, body: PresenceInput, db: Session = Depends(g
     )
     if not identity:
         raise HTTPException(403, "Agent identity revoked")
+    operation = latest_update(db, device_id)
     if body.metadata:
         apply_metadata(device, body.metadata)
     device.online, device.last_seen_at, device.connection_id = True, now(), body.connection_id
     db.add(AuditEvent(event_type="agent_connected", device_id=device.id))
     db.commit()
+    if (
+        operation
+        and operation.state in UPDATE_ACTIVE
+        and body.connection_id != operation.connection_id
+    ):
+        if body.metadata and body.metadata.agent_version == operation.target_version:
+            finish_update(db, operation)
+        elif (
+            body.metadata
+            and body.metadata.agent_version == operation.from_version
+            and operation.state == "restarting"
+        ):
+            finish_update(db, operation, "rollback_completed")
+    return {"ok": True}
+
+
+@app.post("/api/internal/devices/{device_id}/agent-update-status", dependencies=[Depends(internal)])
+def agent_update_status(device_id: uuid.UUID, body: dict, db: Session = Depends(get_db)):
+    if set(body) != {"operation_id", "connection_id", "state", "reason"}:
+        raise HTTPException(400, "Invalid update status")
+    try:
+        op = db.get(AgentUpdate, uuid.UUID(body["operation_id"]))
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(400, "Invalid operation") from None
+    device = db.get(Device, device_id)
+    if (
+        not op
+        or not device
+        or op.device_id != device_id
+        or op.connection_id != body["connection_id"]
+        or device.connection_id != body["connection_id"]
+        or op.state not in UPDATE_ACTIVE
+    ):
+        raise HTTPException(409, "Update connection changed")
+    state = body["state"]
+    if state == "failed":
+        if body["reason"] not in UPDATE_REASONS:
+            raise HTTPException(400, "Invalid failure reason")
+        finish_update(db, op, body["reason"])
+    elif state in ("downloading", "installing", "restarting") and body["reason"] is None:
+        if ("pending", "downloading", "installing", "restarting").index(
+            state
+        ) < UPDATE_ACTIVE.index(op.state):
+            raise HTTPException(409, "Invalid update transition")
+        op.state = state
+        if not op.started_at:
+            op.started_at = now()
+        if state == "restarting" and not op.restarting_at:
+            op.restarting_at = now()
+        db.commit()
+    else:
+        raise HTTPException(400, "Invalid update status")
     return {"ok": True}
 
 

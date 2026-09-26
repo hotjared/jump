@@ -168,7 +168,7 @@ def main():
                 "online": False,
                 "last_seen": None,
                 "revoked": False,
-                "revision": "0002",
+                "revision": "0003",
             }
 
             script = (

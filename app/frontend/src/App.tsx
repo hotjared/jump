@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { agentFilename, downloadFor, enrollmentCommand, type AgentDownloads, type Platform } from './agent-downloads'
 import { canDeleteDevice, deletionConfirmed, deletionName, deviceDeleteMethod } from './device-actions'
+import AgentUpdatePanel, { type UpdateInfo } from './AgentUpdatePanel'
 const TerminalPanel = lazy(() => import('./TerminalPanel'))
 
 type Named = { id: string; name: string }
@@ -10,6 +11,7 @@ type Device = {
   capabilities: string[]; addresses: string[]; primary_ip: string | null;
   current_user: string | null; group: Named | null; tags: Named[];
   online: boolean; identity_state: "active" | "revoked" | "none"; last_seen_at: string | null; enrolled_at: string; ssh_host_key: string | null;
+  agent_update: UpdateInfo;
 }
 type User = { id: string; email: string; display_name: string; role: string; csrf: string }
 type Event = { id: string; event_type: string; created_at: string; device_id: string | null }
@@ -176,6 +178,7 @@ export default function App() {
       <div className="tabs">{['Overview','Remote','Terminal','Files','Actions'].map(t => <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>{t}</button>)}</div>
       {tab === 'Overview' ? <div className="details">
         {[['Hostname',device.hostname],['Operating system',`${device.os_family} ${device.os_version}`],['Architecture',device.architecture],['IP address',device.primary_ip || '—'],['Current user',device.current_user || '—'],['Last check-in',formatDate(device.last_seen_at)],['Agent version',device.agent_version],['Enrolled',formatDate(device.enrolled_at)],['Capabilities',device.capabilities.join(', ') || '—']].map(([key,value]) => <div className="detail" key={key}><span>{key}</span><strong>{value}</strong></div>)}
+        <AgentUpdatePanel info={device.agent_update} name={device.display_name || device.hostname} online={device.online} active={device.identity_state === 'active'} admin={user.role === 'admin'} busy={busy} update={() => action(async () => { await mutate(`/api/devices/${device.id}/agent-update`, 'POST'); await refresh(true) })} />
         <div className="detail"><span>Group</span>{user.role === 'admin' ? <select value={device.group?.id || ''} onChange={e => action(async () => { await mutate(`/api/devices/${device.id}`, 'PATCH', { display_name: device.display_name, group_id: e.target.value || null, tag_ids: device.tags.map(t => t.id) }); await refresh(true) })}><option value="">Ungrouped</option>{groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select> : <strong>{device.group?.name || 'Ungrouped'}</strong>}</div>
         <div className="detail"><span>Tags</span><div>{tags.map(t => <label className="tag-choice" key={t.id}><input type="checkbox" disabled={user.role !== 'admin' || busy} checked={device.tags.some(dt => dt.id === t.id)} onChange={() => action(async () => { const ids = device.tags.some(dt => dt.id === t.id) ? device.tags.filter(dt => dt.id !== t.id).map(dt => dt.id) : [...device.tags.map(dt => dt.id), t.id]; await mutate(`/api/devices/${device.id}`, 'PATCH', { display_name: device.display_name, group_id: device.group?.id || null, tag_ids: ids }); await refresh(true) })} />{t.name}</label>)}{!tags.length && '—'}</div></div>
         <section className="identity-control"><h3>Agent identity</h3><p>{device.identity_state === 'revoked' ? 'Revoked. This agent cannot reconnect. You may now permanently delete the device record.' : 'Revoking disconnects the agent and permanently rejects its current key. The device record is retained.'}</p>

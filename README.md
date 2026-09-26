@@ -33,6 +33,8 @@ The agent defaults to `/var/lib/jump-agent/identity.json` on Linux and `%Program
 
 For upgrades, rollback, GHCR visibility, and local image builds for development, see [deployment and operations](docs/deployment.md).
 
+Admins can update an older `agent_update_v1` service from its device details when `JUMP_AGENT_VERSION` points to a newer published stable release. Agents installed before this capability need [one manual upgrade](docs/deployment.md#administrator-initiated-agent-updates) first. Jump blocks updates during active SSH sessions.
+
 ## Native agent downloads
 
 Jump offers Linux amd64 and Windows amd64 binaries from the matching [GitHub Release](https://github.com/hotjared/jump/releases). The enrollment UI links to the selected binary and `SHA256SUMS`; no Go toolchain or source checkout is needed on endpoints. A tagged server image offers its matching agent release. When deploying `latest` or a commit SHA, set `JUMP_AGENT_VERSION` to an existing `v*` release tag in `.env` and restart Jump. The UI does not offer a download until a release version is known and its assets have been published.

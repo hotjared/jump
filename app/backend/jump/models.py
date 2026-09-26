@@ -156,6 +156,25 @@ class RemoteSession(Base):
     __table_args__ = (Index("ix_remote_sessions_device", "device_id"),)
 
 
+class AgentUpdate(Base):
+    __tablename__ = "agent_updates"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    device_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"))
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    from_version: Mapped[str] = mapped_column(String(64))
+    target_version: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(16), default="pending")
+    connection_id: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    restarting_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(64))
+    __table_args__ = (Index("ix_agent_updates_device", "device_id"),)
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
