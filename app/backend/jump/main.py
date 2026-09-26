@@ -621,7 +621,7 @@ def reconcile(db: Session = Depends(get_db)):
     )
     for session in db.scalars(
         select(RemoteSession).where(RemoteSession.state.in_(["connecting", "active"]))
-    ):
+    ).all():
         finish_ssh_session(db, session, "service_restarted")
     db.commit()
     return {"ok": True}
