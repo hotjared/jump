@@ -2,7 +2,9 @@ import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { agentFilename, downloadFor, enrollmentCommand, type AgentDownloads, type Platform } from './agent-downloads'
 import { canDeleteDevice, deletionConfirmed, deletionName, deviceDeleteMethod } from './device-actions'
 import AgentUpdatePanel, { type UpdateInfo } from './AgentUpdatePanel'
+import { SshSession } from './ssh-session'
 const TerminalPanel = lazy(() => import('./TerminalPanel'))
+const SessionWorkspace = lazy(() => import('./SessionWorkspace'))
 
 type Named = { id: string; name: string }
 type Device = {
@@ -39,6 +41,8 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null)
   const [authPending, setAuthPending] = useState(true)
   const [page, setPage] = useState<Page>('Devices')
+  const [sessions, setSessions] = useState<SshSession[]>([])
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [devices, setDevices] = useState<Device[]>([])
   const [groups, setGroups] = useState<Named[]>([])
   const [tags, setTags] = useState<Named[]>([])
@@ -87,6 +91,23 @@ export default function App() {
     [devices, query, status, os, group, tag])
   const device = devices.find(d => d.id === selected)
   const online = devices.filter(d => d.online).length
+  const activeSession = sessions.find(session => session.id === activeSessionId)
+
+  function openSession(session: SshSession) {
+    // A disconnected tab may be replaced by a fresh connection to the same device.
+    sessions.filter(old => old.deviceId === session.deviceId).forEach(old => old.disconnect())
+    setSessions(previous => [...previous.filter(old => old.deviceId !== session.deviceId), session])
+    setActiveSessionId(session.id)
+    setSelected(null)
+  }
+
+  function closeSession(id: string) {
+    const index = sessions.findIndex(session => session.id === id)
+    sessions[index]?.disconnect()
+    const remaining = sessions.filter(session => session.id !== id)
+    setSessions(remaining)
+    if (activeSessionId === id) setActiveSessionId(remaining[index]?.id || remaining[index - 1]?.id || null)
+  }
 
   async function mutate<T>(url: string, method: string, body?: unknown): Promise<T> {
     const response = await fetch(url, {
@@ -129,14 +150,15 @@ export default function App() {
     <aside className="sidebar">
       <div className="brand"><span className="logo">J<span>↗</span></span><span>Jump</span></div>
       <div className="nav-label">WORKSPACE</div>
-      <nav>{nav.map((item, i) => <button key={item} className={page === item ? 'active' : ''} onClick={() => { setPage(item); setSelected(null) }}>
+      <nav>{nav.map((item, i) => <button key={item} className={page === item && !activeSessionId ? 'active' : ''} onClick={() => { setPage(item); setActiveSessionId(null); setSelected(null) }}>
         <span className="nav-icon">{['◫', '▤', '▣', '↗', '≡', '⚙'][i]}</span>{item}
       </button>)}</nav>
       <div className="sidebar-bottom"><div className="avatar">{user.display_name[0]?.toUpperCase()}</div><div><strong>{user.display_name}</strong><small>{user.role}</small></div></div>
     </aside>
     <main className="main">
-      <header className="topbar"><div className="breadcrumbs">Workspace <span>/</span> <strong>{page}</strong></div><div className="top-right"><span className="live-dot" /> System ready</div></header>
-      <div className="content">
+      <header className="topbar"><div className="breadcrumbs">Workspace <span>/</span> <strong>{activeSession ? activeSession.name + ' · SSH' : page}</strong></div><div className="top-right"><span className="live-dot" /> System ready</div></header>
+      <Suspense fallback={null}><SessionWorkspace sessions={sessions} activeId={activeSessionId} select={id => { setActiveSessionId(id); setSelected(null) }} close={closeSession} /></Suspense>
+      <div className="content" hidden={Boolean(activeSessionId)}>
         {error && <div className="error" role="alert">{error}<button onClick={() => setError('')}>×</button></div>}
         {page === 'Dashboard' && <>
           <div className="heading"><div><p className="eyebrow">OVERVIEW</p><h1>Dashboard</h1><p>Device presence and recent activity at a glance.</p></div></div>
@@ -201,7 +223,9 @@ export default function App() {
             }
           }}>Delete device</button>}
         </section>
-      </div> : tab === 'Terminal' ? <Suspense fallback={<div className="placeholder compact">Loading terminal…</div>}><TerminalPanel key={device.id} device={device} admin={user.role === 'admin'} mutate={mutate} /></Suspense> : <div className="placeholder compact"><span>◇</span><h2>{tab} is not available yet</h2><p>Connection and action features arrive in a later phase.</p></div>}
+      </div> : tab === 'Terminal' ? <Suspense fallback={<div className="placeholder compact">Loading terminal…</div>}><TerminalPanel key={device.id} device={device} admin={user.role === 'admin'} mutate={mutate}
+        existing={sessions.find(session => session.deviceId === device.id)} onConnected={openSession}
+        onOpenExisting={() => { const session = sessions.find(item => item.deviceId === device.id); if (session) { setActiveSessionId(session.id); setSelected(null) } }} /></Suspense> : <div className="placeholder compact"><span>◇</span><h2>{tab} is not available yet</h2><p>Connection and action features arrive in a later phase.</p></div>}
     </aside></div>}
     {enrolling && <div className="overlay" onClick={() => setEnrolling(false)}><div className="modal" onClick={e => e.stopPropagation()}><button className="close" aria-label="Close" onClick={() => setEnrolling(false)}>×</button><p className="eyebrow">NEW ENDPOINT</p><h2>Enroll a device</h2>
       {!issued && <><p>Choose the operating system, download its native agent, then generate a single-use token.</p><div className="platform">{(['linux','windows'] as Platform[]).map(v => <button key={v} type="button" aria-pressed={platform === v} className={platform === v ? 'chosen' : ''} onClick={() => setPlatform(v)}>{v === 'windows' ? '⊞  Windows amd64' : '⌘  Linux amd64'}</button>)}</div></>}
