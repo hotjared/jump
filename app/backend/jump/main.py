@@ -648,7 +648,7 @@ def credential_output(item: Credential) -> dict:
 
 @app.get("/api/devices/{device_id}/credentials")
 def list_credentials(
-    device_id: uuid.UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
+    device_id: uuid.UUID, user: User = Depends(admin), db: Session = Depends(get_db)
 ):
     if not db.get(Device, device_id):
         raise HTTPException(404)
@@ -724,7 +724,7 @@ def new_ssh_session(
     device_id: uuid.UUID,
     body: SSHSessionInput,
     request: Request,
-    user: User = Depends(current_user),
+    user: User = Depends(admin),
     db: Session = Depends(get_db),
 ):
     device = db.get(Device, device_id)

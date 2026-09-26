@@ -116,7 +116,7 @@ Backend: `cd app/backend && uv pip install -e '.[dev]' && alembic upgrade head &
 
 Install and run an SSH server on each Linux target. The Jump agent connects to
 `127.0.0.1:22`; you do not need to expose port 22 to the Internet. In the
-device's Terminal tab, save a Jump-managed password or SSH private key
+device's Terminal tab as a Jump admin, save a Jump-managed password or SSH private key
 credential. The selected credential is encrypted at rest and decrypted only
 while opening that session.
 

@@ -138,6 +138,10 @@ def test_credential_creation_requires_admin_and_never_reads_back_secret(client, 
     listed = client.get(path)
     assert listed.status_code == 200 and len(listed.json()) == 1
     assert "PRIVATE KEY" not in result.text + listed.text
+    user.role = Role.USER
+    db.commit()
+    assert client.get(path).status_code == 403
+    assert create(client, device, result.json()["id"]).status_code == 403
 
 
 def test_reset_is_admin_only_and_requires_csrf(client, db):

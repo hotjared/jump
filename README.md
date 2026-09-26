@@ -78,7 +78,7 @@ Source builds report `dev`; release builds report the tag in the device metadata
 This is an early security-sensitive foundation. Review [known limitations](docs/architecture.md#known-limitations) before exposing it to the Internet.
 ## Browser SSH sessions
 
-On an enrolled Linux device, open **Terminal**, save a password or unencrypted
+As a Jump admin, open **Terminal** on an enrolled Linux device, save a password or unencrypted
 SSH private key credential, then choose it and select **Connect**. SSH must be
 installed and listening on `127.0.0.1:22` on that device. The agent opens the
 local SSH connection; no inbound Internet SSH port is needed.

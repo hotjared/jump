@@ -27,12 +27,13 @@ export default function TerminalPanel({ device, admin, mutate }: {
   const connected = useRef(false)
 
   useEffect(() => {
+    if (!admin) return
     fetch(`/api/devices/${device.id}/credentials`, { credentials: 'same-origin' })
       .then(r => { if (!r.ok) throw new Error('Could not load credentials'); return r.json() as Promise<Credential[]> })
       .then(items => { setCredentials(items.filter(item => ['linux_password', 'linux_ssh_key'].includes(item.kind))) })
       .catch(e => setError(e.message))
     return () => { socket.current?.close(); resize.current?.disconnect(); input.current?.dispose(); terminal.current?.dispose() }
-  }, [device.id])
+  }, [admin, device.id])
 
   function setupTerminal(ws: WebSocket) {
     if (!node.current) return
@@ -99,6 +100,8 @@ export default function TerminalPanel({ device, admin, mutate }: {
 
   if (device.os_family !== 'linux' || !device.capabilities.includes('ssh'))
     return <div className="placeholder compact"><h2>Terminal unavailable</h2><p>This agent does not advertise Linux SSH support.</p></div>
+  if (!admin)
+    return <div className="placeholder compact"><h2>Admin access required</h2><p>SSH access is currently limited to Jump administrators.</p></div>
 
   return <div className="terminal-panel">
     <p className="muted">SSH through the connected Jump agent to localhost:22.</p>
