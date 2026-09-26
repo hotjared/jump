@@ -10,16 +10,30 @@ const render = (info: UpdateInfo, admin = true) => renderToStaticMarkup(
   <AgentUpdatePanel info={info} name="PROD-SRV01" online active admin={admin} busy={false} update={vi.fn()} />)
 
 describe('agent update states', () => {
-  it('shows the supported action and the manual bootstrap state', () => {
+  it('hides the entire panel for an up-to-date agent, including after completion', () => {
+    const current = { ...base, current_version: 'v0.1.3', update_available: false }
+    expect(render(current)).toBe('')
+    expect(render({ ...current, update_state: { state: 'completed', target_version: 'v0.1.3', failure_reason: null } })).toBe('')
+  })
+  it('shows an available update', () => {
+    expect(render(base)).toContain('aria-label="Agent update"')
     expect(render(base)).toContain('Update agent')
-    expect(render({ ...base, remote_update_supported: false })).toContain('updated manually once')
-    expect(render({ ...base, remote_update_supported: false })).not.toContain('<button')
     expect(render(base, false)).not.toContain('<button')
   })
-  it('shows current, progress, failure, and success', () => {
-    expect(render({ ...base, current_version: 'v0.1.3', update_available: false })).toContain('Agent is up to date')
-    expect(render({ ...base, update_state: { state: 'restarting', target_version: 'v0.1.3', failure_reason: null } })).toContain('Waiting for it to reconnect')
-    expect(render({ ...base, update_state: { state: 'failed', target_version: 'v0.1.3', failure_reason: 'checksum_mismatch' } })).toContain('checksum mismatch')
-    expect(render({ ...base, current_version: 'v0.1.3', update_available: false, update_state: { state: 'completed', target_version: 'v0.1.3', failure_reason: null } })).toContain('Update successful')
+  it('shows manual bootstrap without an update button', () => {
+    const html = render({ ...base, remote_update_supported: false })
+    expect(html).toContain('aria-label="Agent update"')
+    expect(html).toContain('updated manually once')
+    expect(html).not.toContain('<button')
+  })
+  it('shows an in-progress update even when no update is currently available', () => {
+    const html = render({ ...base, update_available: false, update_state: { state: 'restarting', target_version: 'v0.1.3', failure_reason: null } })
+    expect(html).toContain('aria-label="Agent update"')
+    expect(html).toContain('Waiting for it to reconnect')
+  })
+  it('shows a failed update even when no update is currently available', () => {
+    const html = render({ ...base, update_available: false, update_state: { state: 'failed', target_version: 'v0.1.3', failure_reason: 'checksum_mismatch' } })
+    expect(html).toContain('aria-label="Agent update"')
+    expect(html).toContain('checksum mismatch')
   })
 })
