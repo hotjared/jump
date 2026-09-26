@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -49,23 +50,31 @@ type identity struct {
 	PrivateKey string `json:"private_key"`
 }
 type message struct {
-	Version      int      `json:"version"`
-	Type         string   `json:"type"`
-	DeviceID     string   `json:"device_id,omitempty"`
-	ConnectionID string   `json:"connection_id,omitempty"`
-	Challenge    string   `json:"challenge,omitempty"`
-	Signature    string   `json:"signature,omitempty"`
-	Metadata     metadata `json:"metadata,omitempty"`
-	SessionID    string   `json:"session_id,omitempty"`
-	Kind         string   `json:"kind,omitempty"`
-	Username     string   `json:"username,omitempty"`
-	Secret       string   `json:"secret,omitempty"`
-	HostKey      string   `json:"host_key,omitempty"`
-	Fingerprint  string   `json:"fingerprint,omitempty"`
-	Code         string   `json:"code,omitempty"`
-	Data         string   `json:"data,omitempty"`
-	Columns      int      `json:"columns,omitempty"`
-	Rows         int      `json:"rows,omitempty"`
+	Version       int      `json:"version"`
+	Type          string   `json:"type"`
+	DeviceID      string   `json:"device_id,omitempty"`
+	ConnectionID  string   `json:"connection_id,omitempty"`
+	Challenge     string   `json:"challenge,omitempty"`
+	Signature     string   `json:"signature,omitempty"`
+	Metadata      metadata `json:"metadata,omitempty"`
+	SessionID     string   `json:"session_id,omitempty"`
+	Kind          string   `json:"kind,omitempty"`
+	Username      string   `json:"username,omitempty"`
+	Secret        string   `json:"secret,omitempty"`
+	HostKey       string   `json:"host_key,omitempty"`
+	Fingerprint   string   `json:"fingerprint,omitempty"`
+	Code          string   `json:"code,omitempty"`
+	Data          string   `json:"data,omitempty"`
+	Columns       int      `json:"columns,omitempty"`
+	Rows          int      `json:"rows,omitempty"`
+	OperationID   string   `json:"operation_id,omitempty"`
+	TargetVersion string   `json:"target_version,omitempty"`
+	Platform      string   `json:"platform,omitempty"`
+	Architecture  string   `json:"architecture,omitempty"`
+	DownloadURL   string   `json:"download_url,omitempty"`
+	SHA256        string   `json:"sha256,omitempty"`
+	State         string   `json:"state,omitempty"`
+	Reason        string   `json:"reason,omitempty"`
 }
 
 func info() metadata {
@@ -87,6 +96,9 @@ func info() metadata {
 		}
 	}
 	caps := []string{"filesystem", "system_info"}
+	if runtime.GOARCH == "amd64" && (runtime.GOOS == "linux" || runtime.GOOS == "windows") {
+		caps = append(caps, "agent_update_v1")
+	}
 	if runtime.GOOS == "windows" {
 		caps = append(caps, "rdp", "powershell")
 	} else {
@@ -259,12 +271,26 @@ func connect(ctx context.Context, id identity) error {
 		return conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(5*time.Second))
 	})
 	done := make(chan error, 1)
+	updating := make(chan error, 1)
+	var updateStarted atomic.Bool
 	go func() {
 		for {
 			var incoming message
 			if err := conn.ReadJSON(&incoming); err != nil {
 				done <- err
 				return
+			}
+			if incoming.Version == 1 && incoming.Type == "agent_update" {
+				if updateStarted.CompareAndSwap(false, true) {
+					go func() {
+						err := performUpdate(mux, incoming)
+						if err != nil {
+							updateStarted.Store(false)
+						}
+						updating <- err
+					}()
+				}
+				continue
 			}
 			if incoming.Version != 1 || !mux.handle(incoming) {
 				done <- errors.New("invalid session frame")
@@ -281,6 +307,11 @@ func connect(ctx context.Context, id identity) error {
 			return nil
 		case err := <-done:
 			return err
+		case err := <-updating:
+			if err == nil {
+				return errUpdateHandoff
+			}
+			slog.Warn("agent update failed", "error", err)
 		case <-ticker.C:
 			if err := mux.send(message{Version: 1, Type: "heartbeat"}); err != nil {
 				return err
@@ -304,6 +335,9 @@ func run(ctx context.Context) error {
 	attempt := 0
 	for ctx.Err() == nil {
 		if err := connect(ctx, id); err != nil {
+			if errors.Is(err, errUpdateHandoff) {
+				return err
+			}
 			slog.Warn("connection lost", "device_id", id.DeviceID, "error", err)
 		}
 		duration := time.Duration(math.Min(float64(time.Second)*math.Pow(2, float64(attempt)), float64(time.Minute)))
@@ -354,6 +388,11 @@ func main() {
 	case "service":
 		if err := serviceCommand(os.Args[2:]); err != nil {
 			slog.Error("service command failed", "error", err)
+			os.Exit(1)
+		}
+	case "internal-update-helper":
+		if err := updateHelper(os.Args[2:]); err != nil {
+			slog.Error("update helper failed", "error", err)
 			os.Exit(1)
 		}
 	default:
