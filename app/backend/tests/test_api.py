@@ -242,7 +242,6 @@ def test_failed_broker_disconnect_preserves_revocation(client, db, monkeypatch):
     )
 
 
-
 def test_device_delete_permissions_and_preconditions(client, db):
     device = Device(hostname="delete-me", os_family="linux", capabilities=[], addresses=[])
     db.add(device)
@@ -326,9 +325,14 @@ def test_revoked_offline_device_delete_cascades_owned_data_and_preserves_shared_
     assert db.scalar(select(Credential).where(Credential.device_id == device_id)) is None
     assert db.get(Group, group.id) is not None
     assert db.get(Tag, tag.id) is not None
-    assert db.scalar(
-        select(func.count()).select_from(device_tags).where(device_tags.c.device_id == device_id)
-    ) == 0
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(device_tags)
+            .where(device_tags.c.device_id == device_id)
+        )
+        == 0
+    )
     assert db.get(AuditEvent, unrelated_audit.id) is not None
 
     event = db.scalar(select(AuditEvent).where(AuditEvent.event_type == "device_deleted"))
