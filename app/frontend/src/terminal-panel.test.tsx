@@ -8,7 +8,7 @@ vi.mock('@xterm/addon-fit', () => ({ FitAddon: class {} }))
 
 import TerminalPanel from './TerminalPanel'
 
-const base = { id: 'device', online: true, os_family: 'linux', capabilities: ['ssh', 'ssh_terminal_v1'], ssh_host_key: null }
+const base = { id: 'device', hostname: 'docker01', display_name: null, online: true, os_family: 'linux', capabilities: ['ssh', 'ssh_terminal_v1'], ssh_host_key: null }
 async function mutate<T>(): Promise<T> { throw new Error('Unexpected mutation during server render') }
 
 describe('terminal eligibility', () => {

@@ -11,3 +11,29 @@
 .ssh-credential-form { display: grid; gap: 10px; margin-top: 24px; }
 .ssh-credential-form textarea { min-height: 100px; font-family: monospace; }
 .fingerprint code { overflow-wrap: anywhere; }
+
+/* Remote sessions remain mounted while ordinary pages are shown. */
+.main{display:flex;flex-direction:column;min-height:100vh}
+.content[hidden],.session-view[hidden]{display:none!important}
+.session-workspace{display:flex;flex-direction:column;min-height:0}
+.session-workspace.workspace-open{flex:1;min-height:calc(100vh - 70px)}
+.session-tabs{display:flex;align-items:stretch;gap:5px;overflow-x:auto;padding:10px 22px 0;background:#121416;border-bottom:1px solid #303337}
+.session-tab{display:flex;align-items:center;flex-shrink:0;max-width:260px;border:1px solid #303337;border-bottom:0;border-radius:8px 8px 0 0;background:#1a1c1f}
+.session-tab.selected{background:#24272a;border-color:#50555a}
+.session-tab>button:first-child{display:flex;align-items:center;gap:8px;min-width:0;background:none;border:0;color:#e6e8ea;padding:10px 5px 10px 13px;font-size:12px;white-space:nowrap}
+.session-tab small{color:#9aa0a6;font-size:10px}
+.session-tab-close{background:none;border:0;color:#9ba1a8;font-size:19px;padding:4px 12px}
+.session-tab-close:hover{color:#fff}
+.session-dot,.session-state i{display:inline-block;width:7px;height:7px;border-radius:50%;background:#d5a762;flex-shrink:0}
+.session-dot.connected,.session-state.connected i{background:#69c89b}
+.session-dot.disconnected,.session-dot.error,.session-state.disconnected i,.session-state.error i{background:#dc7777}
+.session-view{display:flex;flex:1;min-height:0;flex-direction:column;padding:18px 22px 0}
+.session-heading{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:0 2px 16px}
+.session-heading>div{display:flex;align-items:center;gap:16px;font-size:12px}
+.session-heading strong{font-size:16px}
+.session-state{display:inline-flex;align-items:center;gap:7px;text-transform:capitalize;color:#aaa;font-size:11px}
+.session-error{color:#e39999;font-size:12px}
+.workspace-terminal{flex:1;min-height:360px;min-width:0;background:#111318;padding:12px;border:1px solid #303337;border-radius:8px 8px 0 0}
+.workspace-terminal .xterm{height:100%}
+.session-footer{color:#858c93;padding:11px 4px;font-size:11px}
+.session-tab button:focus-visible,.session-heading button:focus-visible{outline:2px solid #dce5ed;outline-offset:2px}
