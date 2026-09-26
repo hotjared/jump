@@ -3,11 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import App from './App'
 
-const terminalMocks = vi.hoisted(() => ({ created: 0, disposed: 0, writes: [] as string[] }))
+const terminalMocks = vi.hoisted(() => ({
+  created: 0, disposed: 0, fits: 0, writes: [] as string[],
+  instances: [] as Array<{ cols: number; rows: number }>,
+}))
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
     cols = 80; rows = 24
-    constructor() { terminalMocks.created++ }
+    constructor() { terminalMocks.created++; terminalMocks.instances.push(this) }
     loadAddon() {}
     open() {}
     onData() { return { dispose() {} } }
@@ -16,7 +19,15 @@ vi.mock('@xterm/xterm', () => ({
     dispose() { terminalMocks.disposed++ }
   },
 }))
-vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} } }))
+vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() { terminalMocks.fits++ } } }))
+
+const resizeObservers: FakeResizeObserver[] = []
+class FakeResizeObserver {
+  constructor(private callback: ResizeObserverCallback) { resizeObservers.push(this) }
+  observe() {}
+  disconnect() {}
+  trigger() { this.callback([], this as unknown as ResizeObserver) }
+}
 
 class FakeSocket {
   static OPEN = 1
@@ -47,10 +58,12 @@ function response(data: unknown) { return { ok: true, json: async () => data } }
 
 beforeEach(() => {
   FakeSocket.instances = []; nextSession = 0; requests.length = 0
-  terminalMocks.created = 0; terminalMocks.disposed = 0; terminalMocks.writes = []
+  terminalMocks.created = 0; terminalMocks.disposed = 0; terminalMocks.fits = 0; terminalMocks.writes = []; terminalMocks.instances = []
+  resizeObservers.length = 0
   devices = [makeDevice('docker01'), makeDevice('web01')]
   vi.stubGlobal('WebSocket', FakeSocket)
-  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  vi.stubGlobal('ResizeObserver', FakeResizeObserver)
+  vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue({ length: 1 } as DOMRectList)
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 1 })
   vi.stubGlobal('cancelAnimationFrame', () => {})
   vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
@@ -63,7 +76,7 @@ beforeEach(() => {
     throw new Error(`Unexpected request: ${input}`)
   }))
 })
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 async function openDevice(id: string) {
   await waitFor(() => expect(Array.from(document.querySelectorAll('.device-row')).some(row => row.textContent?.includes(id))).toBe(true))
@@ -86,6 +99,33 @@ async function connectDevice(id: string) {
 }
 
 describe('session workspace', () => {
+
+  it('deduplicates terminal resizes, ignores hidden tabs, and resizes once when shown again', async () => {
+    render(<App />)
+    const socket = await connectDevice('docker01')
+    const resizeFrames = () => socket.sent.map(message => JSON.parse(message)).filter(frame => frame.type === 'session_resize')
+
+    await waitFor(() => expect(resizeFrames().length).toBeGreaterThan(0))
+    const initial = resizeFrames().length
+    resizeObservers.at(-1)!.trigger()
+    resizeObservers.at(-1)!.trigger()
+    expect(resizeFrames()).toHaveLength(initial)
+
+    terminalMocks.instances.at(-1)!.rows = 30
+    resizeObservers.at(-1)!.trigger()
+    expect(resizeFrames()).toHaveLength(initial + 1)
+    expect(resizeFrames().at(-1)).toMatchObject({ columns: 80, rows: 30 })
+
+    fireEvent.click(screen.getByRole('button', { name: /Devices$/ }))
+    terminalMocks.instances.at(-1)!.rows = 31
+    resizeObservers.at(-1)!.trigger()
+    expect(resizeFrames()).toHaveLength(initial + 1)
+
+    fireEvent.click(screen.getByRole('tab', { name: /docker01/ }))
+    expect(resizeFrames()).toHaveLength(initial + 2)
+    expect(resizeFrames().at(-1)).toMatchObject({ columns: 80, rows: 31 })
+  })
+
   it('moves a connected terminal from the drawer into a large persistent tab, preserves two buffers through navigation, and disconnects on close', async () => {
     render(<App />)
     const first = await connectDevice('docker01')
