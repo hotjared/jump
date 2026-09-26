@@ -279,6 +279,46 @@ def revoke_device(
     return serialize_device(item)
 
 
+@app.delete("/api/devices/{device_id}")
+def delete_device(
+    device_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(admin),
+    db: Session = Depends(get_db),
+):
+    item = db.scalar(select(Device).where(Device.id == device_id).with_for_update())
+    if not item:
+        raise HTTPException(404)
+    identity = db.scalar(
+        select(AgentIdentity).where(AgentIdentity.device_id == device_id).with_for_update()
+    )
+    if not identity:
+        raise HTTPException(409, "Device has no agent identity and cannot be deleted")
+    if identity.revoked_at is None:
+        raise HTTPException(409, "Revoke the agent identity before deleting this device")
+    if item.online:
+        raise HTTPException(409, "Device must be offline before deletion")
+
+    former = {
+        "device_id": str(item.id),
+        "device_uuid": str(item.device_uuid),
+        "hostname": item.hostname,
+        "display_name": item.display_name,
+    }
+    db.add(
+        AuditEvent(
+            event_type="device_deleted",
+            actor_user_id=user.id,
+            device_id=None,
+            detail=former,
+            request_id=request.state.request_id,
+        )
+    )
+    db.delete(item)
+    db.commit()
+    return {"ok": True}
+
+
 @app.get("/api/groups")
 def groups(user: User = Depends(current_user), db: Session = Depends(get_db)):
     return [{"id": g.id, "name": g.name} for g in db.scalars(select(Group).order_by(Group.name))]

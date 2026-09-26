@@ -223,3 +223,70 @@ func TestRevocationClosesActiveConnectionAndRejectsReconnect(t *testing.T) {
 	}
 	response.Body.Close()
 }
+
+func TestDeletedIdentityIsRejected(t *testing.T) {
+	public, private, _ := ed25519.GenerateKey(rand.Reader)
+	deviceID := "bd0b50e5-4cad-4fcf-9666-3bf2f8e43b4c"
+	token := "test-token-with-at-least-32-characters"
+	var deleted atomic.Bool
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if strings.Contains(r.URL.Path, "identities") {
+			if deleted.Load() {
+				http.Error(w, "unknown device", http.StatusNotFound)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]string{
+				"public_key": base64.StdEncoding.EncodeToString(public),
+			})
+			return
+		}
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer api.Close()
+
+	b := &broker{
+		api: api.URL, token: token, client: api.Client(), active: make(map[string]*websocket.Conn),
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/connect", b.ws)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	endpoint := "ws" + strings.TrimPrefix(server.URL, "http") + "/connect?device_id=" + deviceID
+	conn, _, err := websocket.DefaultDialer.Dial(endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var challenge message
+	if err := conn.ReadJSON(&challenge); err != nil {
+		t.Fatal(err)
+	}
+	nonce, _ := base64.StdEncoding.DecodeString(challenge.Challenge)
+	signature := base64.StdEncoding.EncodeToString(
+		ed25519.Sign(private, append([]byte("jump-agent-v1:"), nonce...)),
+	)
+	if err := conn.WriteJSON(message{
+		Version: 1, Type: "auth", DeviceID: deviceID, Signature: signature,
+		Metadata: json.RawMessage(`{"hostname":"test","os_family":"linux"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var ready message
+	if err := conn.ReadJSON(&ready); err != nil || ready.Type != "ready" {
+		t.Fatalf("ready: %v %v", ready, err)
+	}
+	conn.Close()
+	b.wg.Wait()
+
+	deleted.Store(true)
+	_, response, err := websocket.DefaultDialer.Dial(endpoint, nil)
+	if err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("deleted identity reconnected: %v %v", response, err)
+	}
+	response.Body.Close()
+}

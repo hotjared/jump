@@ -65,9 +65,32 @@ docker compose up -d
 
 To roll back, restore the previous `JUMP_VERSION` and repeat those commands. Back up PostgreSQL and `JUMP_MASTER_KEY` before upgrades: a future Alembic migration may make an older application image incompatible with the upgraded database schema, so an image-only rollback may be unsafe.
 
-Download the agent from the enrollment UI. Enroll with the one-time command displayed there, then run the agent under a service manager with automatic restart. On Linux, keep the identity path at mode 0600 in a 0700 directory. On Windows, restrict the `%ProgramData%\Jump` directory to SYSTEM, Administrators and the agent service identity before enrollment. Example elevated command: `icacls "%ProgramData%\Jump" /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"`. Confirm the service identity can read the file. Do not copy private identities between endpoints.
+Download the agent from the enrollment UI and use the displayed one-time enrollment command, then install the native service.
 
-To remove an agent’s access, open its device details as an admin and choose **Revoke agent identity**. Jump retains the device and audit history, marks it offline, rejects the old private key permanently, and asks the broker to close any live connection. If the API reports that the broker disconnect could not be confirmed, the key is still revoked in PostgreSQL; retry the same action when the broker is available. Revocation does not delete the device. A replacement agent must be enrolled as a new device with a new one-time token and local keypair.
+Linux amd64:
+
+```sh
+chmod +x jump-agent-linux-amd64
+sudo ./jump-agent-linux-amd64 enroll --server https://agent.example.com --token <TOKEN>
+sudo ./jump-agent-linux-amd64 service install
+```
+
+The install command copies the binary to `/usr/local/bin/jump-agent`, writes `/etc/systemd/system/jump-agent.service`, reloads systemd, and enables/starts the service. The unit runs `jump-agent run`, starts at boot, and restarts on failure. The identity remains at `/var/lib/jump-agent/identity.json` with the existing restrictive directory/file permissions. `sudo jump-agent service stop|start|uninstall` manages the service; uninstall disables and removes the unit but does not remove the identity.
+
+Windows amd64, from elevated PowerShell:
+
+```powershell
+.\jump-agent-windows-amd64.exe enroll --server https://agent.example.com --token <TOKEN>
+.\jump-agent-windows-amd64.exe service install
+```
+
+The install command copies the agent under Program Files and registers the native `JumpAgent` Windows service with display name `Jump Agent`. It runs as LocalSystem, starts automatically, and is configured to restart after failures. Identity remains at `%ProgramData%\Jump\identity.json`; the existing ACL hardening to SYSTEM and Administrators is preserved. `service uninstall` removes the service registration but intentionally leaves the identity in place.
+
+For both platforms, `jump-agent run` remains available as a foreground troubleshooting/development command. Closing that foreground terminal stops that diagnostic process; the normal installation path is the native service.
+
+To remove an agent’s access, open its device details as an admin and choose **Revoke agent identity**. Jump retains the device and audit history, marks it offline, rejects the old private key permanently, and asks the broker to close any live connection. If the API reports that the broker disconnect could not be confirmed, the key is still revoked in PostgreSQL; retry the same action when the broker is available. Revocation does not delete the device.
+
+After revocation, an offline device can optionally be permanently deleted from its device details. Jump requires a separate delete action and exact-name confirmation; deletion never silently performs revocation. The device record, agent identity, device credentials, and device/tag relationship rows are removed, while shared groups, tags, users, and the durable deletion audit event remain. Deletion is irreversible. Because the device and identity no longer exist, the previously revoked private key remains unusable and broker authentication returns unknown/rejected. A replacement agent must be enrolled as a new device with a new one-time token and local keypair.
 
 ## Backup and restore
 
