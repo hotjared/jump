@@ -91,6 +91,9 @@ func info() metadata {
 		caps = append(caps, "rdp", "powershell")
 	} else {
 		caps = append(caps, "ssh", "shell")
+		if runtime.GOOS == "linux" {
+			caps = append(caps, "ssh_terminal_v1")
+		}
 	}
 	username := ""
 	if current != nil {
