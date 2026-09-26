@@ -98,8 +98,10 @@ export default function TerminalPanel({ device, admin, mutate }: {
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not save credential') }
   }
 
-  if (device.os_family !== 'linux' || !device.capabilities.includes('ssh'))
+  if (device.os_family !== 'linux')
     return <div className="placeholder compact"><h2>Terminal unavailable</h2><p>This agent does not advertise Linux SSH support.</p></div>
+  if (!device.capabilities.includes('ssh_terminal_v1'))
+    return <div className="placeholder compact"><h2>Terminal unavailable</h2><p>Update the Jump agent to enable browser SSH.</p></div>
   if (!admin)
     return <div className="placeholder compact"><h2>Admin access required</h2><p>SSH access is currently limited to Jump administrators.</p></div>
 
