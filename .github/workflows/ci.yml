@@ -49,7 +49,7 @@ jobs:
           cache: false
       - run: go mod tidy && test -z "$(git status --porcelain)" && go test ./... && go vet ./... && go build ./...
         working-directory: ${{ matrix.component }}
-      - run: gofmt -d .; test -z "$(gofmt -l .)"
+      - run: test -z "$(gofmt -l .)"
         working-directory: ${{ matrix.component }}
       - if: matrix.component == 'agent'
         run: |
