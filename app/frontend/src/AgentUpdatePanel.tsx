@@ -15,6 +15,8 @@ export default function AgentUpdatePanel({ info, name, online, active, admin, bu
   { info: UpdateInfo; name: string; online: boolean; active: boolean; admin: boolean; busy: boolean; update: () => void }) {
   const state = info.update_state
   const running = !!state && state.state in progress
+  if (!info.update_available && !running && state?.state !== 'failed') return null
+
   return <section className="identity-control" aria-label="Agent update">
     <h3>Agent update</h3>
     <p>Agent version: {info.current_version || 'Unknown'}</p>
@@ -28,7 +30,6 @@ export default function AgentUpdatePanel({ info, name, online, active, admin, bu
         : admin ? <button className="button" disabled={busy || !online || !active} onClick={() => {
           if (window.confirm(`Update ${name} from ${info.current_version} to ${info.latest_version}?\n\nThe Jump agent service will restart briefly.`)) update()
         }}>Update agent</button> : null}
-    </> : !info.update_available && !running && !state?.failure_reason ?
-      <p>{info.latest_version && info.current_version === info.latest_version ? 'Agent is up to date.' : 'No supported agent update is available.'}</p> : null}
+    </> : null}
   </section>
 }
