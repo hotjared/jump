@@ -31,7 +31,8 @@ function SessionTerminal({ session, visible }: { session: SshSession; visible: b
 
     const scheduleFit = () => {
       if (!visibleRef.current || frame.current !== null) return
-      frame.current = requestAnimationFrame(() => {
+      frame.current = -1
+      const id = requestAnimationFrame(() => {
         frame.current = null
         if (!visibleRef.current || !node.current?.getClientRects().length) return
         addon.fit()
@@ -42,6 +43,7 @@ function SessionTerminal({ session, visible }: { session: SshSession; visible: b
         lastSize.current = { columns, rows }
         session.resize(columns, rows)
       })
+      if (frame.current !== null) frame.current = id
     }
 
     const observer = new ResizeObserver(scheduleFit)
