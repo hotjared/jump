@@ -5,11 +5,30 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"runtime"
 	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
 )
+
+func TestSSHTerminalCapability(t *testing.T) {
+	capabilities := info().Capabilities
+	has := func(name string) bool {
+		for _, capability := range capabilities {
+			if capability == name {
+				return true
+			}
+		}
+		return false
+	}
+	if has("ssh_terminal_v1") != (runtime.GOOS == "linux") {
+		t.Fatalf("unexpected SSH terminal capability on %s: %v", runtime.GOOS, capabilities)
+	}
+	if runtime.GOOS == "linux" && !has("ssh") {
+		t.Fatal("generic SSH capability was removed")
+	}
+}
 
 func TestSSHConfigPasswordKeyAndHostTrust(t *testing.T) {
 	public, private, _ := ed25519.GenerateKey(rand.Reader)
