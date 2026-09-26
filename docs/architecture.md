@@ -23,19 +23,19 @@ The V1 JSON envelope has a mandatory `version` and `type`. Messages are capped a
 
 ## Data and credential boundary
 
-Users, devices, group membership, many-to-many tags, enrollment tokens, Ed25519 public identities, credentials, and general audit events live in PostgreSQL. Devices use a UUID independent of hostname. Credential secrets are encrypted in the API with AES-256-GCM, a 96-bit random nonce, version number, and credential-ID authenticated associated data. `JUMP_MASTER_KEY` is external and never goes into PostgreSQL. The UI and device APIs have no endpoint for decrypted secrets. Phase 2 will add server-side credential selection and injection through the gateway. Future rotation will decrypt each record under its stored version and re-encrypt with the new key. Keep retired keys until rotation completes.
+Users, devices, group membership, many-to-many tags, enrollment tokens, Ed25519 public identities, credentials, and general audit events live in PostgreSQL. Devices use a UUID independent of hostname. Credential secrets are encrypted in the API with AES-256-GCM, a 96-bit random nonce, version number, and credential-ID authenticated associated data. `JUMP_MASTER_KEY` is external and never goes into PostgreSQL. The UI and device APIs have no endpoint for decrypted secrets. SSH session startup decrypts only the selected credential and sends it to the agent for that session. Future rotation will decrypt each record under its stored version and re-encrypt with the new key. Keep retired keys until rotation completes.
 
 ## Future session gateway
 
 - RDP: browser → Jump session gateway → guacd → broker temporary reverse stream → persistent agent → `127.0.0.1:3389` on Windows.
-- SSH: browser → Jump session gateway → guacd → broker temporary reverse stream → persistent agent → `127.0.0.1:22` on Linux.
+- SSH: browser → Jump session gateway → broker logical session over the persistent agent connection → agent SSH client → `127.0.0.1:22` on Linux.
 - Files: browser → Jump API → broker → agent → local filesystem. Planned operations: list, upload, download, rename, delete, create directory. This is separate from Guacamole drive redirection and SFTP.
 
 The agent initiates outbound TLS connections. Endpoints need no inbound Internet ports.
 
 ## Roadmap
 
-- **Phase 2:** multiplexed reverse TCP streams, direct guacd integration, browser RDP and SSH, server-side credential selection/injection.
+- **Phase 2:** browser SSH is implemented over multiplexed logical agent sessions. RDP, file transfer, and remote actions remain future work.
 - **Phase 3:** cross-platform files, shell/PowerShell, reboot and restart-agent actions, richer system information.
 - **Later:** physical-console screen sharing, attended Quick Support and consent workflows.
 
@@ -43,9 +43,22 @@ No VNC, session recording, multitenancy, monitoring, patching, alerting or billi
 
 ## Known limitations
 
-- No real remote sessions or file operations yet; capability names are descriptive.
+- No RDP or file operations yet; those capability names are descriptive.
 - `current_user` reports the agent process account where available, not a detected interactive desktop session.
 - No credential management API or UI yet. The encrypted model and service functions are in place.
 - No internal device certificate authority yet. Ed25519 challenge/response can later be replaced by short-lived device certificates, keeping the same public identity and enrollment boundary.
 - Presence is held by one broker process. Scaling to multiple replicas needs shared coordination and routing; run one broker for now.
 - OIDC provider and its access policy must be configured by the operator. There is no local login or recovery login.
+## SSH session path
+
+Browser → authenticated Jump WebSocket → private token-authenticated broker
+session channel → existing Ed25519-authenticated agent WebSocket → agent SSH
+client → `127.0.0.1:22`.
+
+The broker multiplexes session IDs over the one agent connection while
+presence and heartbeats continue. Each browser session is owned by a Jump user
+and has a database row for creation, activity, connection, and close state.
+Jump sends only the selected decrypted credential in a single `session_open`
+message to that agent. The agent reports the host-key fingerprint after SSH
+authentication; Jump pins it on first success and rejects a later mismatch.
+Terminal bytes are forwarded with bounded frames and are never persisted.

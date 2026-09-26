@@ -112,3 +112,20 @@ Back up `JUMP_MASTER_KEY` separately in a secure secret store. **A database dump
 ## Development
 
 Backend: `cd app/backend && uv pip install -e '.[dev]' && alembic upgrade head && pytest && ruff check . && ruff format --check .`. Frontend: `cd app/frontend && npm ci && npm test && npm run typecheck && npm run build`. Go: in `agent` and `broker`, run `go test ./... && go vet ./... && go build ./...`. To build a local agent from source, run `cd agent && go build -o jump-agent .`; it reports `dev` in metadata. For local image builds use `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build`. The CI integration script uses the same override. The default production Compose file always pulls prebuilt images.
+## SSH terminal prerequisites
+
+Install and run an SSH server on each Linux target. The Jump agent connects to
+`127.0.0.1:22`; you do not need to expose port 22 to the Internet. In the
+device's Terminal tab as a Jump admin, save a Jump-managed password or SSH private key
+credential. The selected credential is encrypted at rest and decrypted only
+while opening that session.
+
+Jump pins the server's SHA256 SSH host key fingerprint on the first successful
+connection. Check the displayed fingerprint against the target if you need
+stronger assurance than Trust On First Use. A mismatch blocks access. An admin
+can reset the trusted key in Terminal after verifying an intentional rotation.
+
+Sessions have a 30-minute idle timeout (no input or output), do not record
+terminal content, and cannot be resumed. Closing the browser terminal or
+disconnecting the agent ends the SSH connection. Keep the broker's internal
+port 8081 private to the Compose network and protect `BROKER_INTERNAL_TOKEN`.

@@ -1,27 +1,63 @@
+import asyncio
 import base64
+import binascii
 import hmac
 import json
 import logging
+import re
 import secrets
 import time
 import uuid
+from datetime import UTC, timedelta
 from pathlib import Path
 
 import httpx
 from authlib.integrations.starlette_client import OAuth
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from websockets.asyncio.client import connect as ws_connect
+from websockets.exceptions import ConnectionClosed
 
 from .config import settings
+from .credentials import create_credential, decrypt_for_gateway
 from .db import get_db
-from .models import AgentIdentity, AuditEvent, Device, EnrollmentToken, Group, Tag, User, now
+from .models import (
+    AgentIdentity,
+    AuditEvent,
+    Credential,
+    Device,
+    EnrollmentToken,
+    Group,
+    RemoteSession,
+    Tag,
+    User,
+    now,
+)
 from .releases import agent_downloads
-from .schemas import DevicePatch, EnrollmentInput, EnrollRequest, Metadata, NameInput, PresenceInput
+from .schemas import (
+    CredentialInput,
+    DevicePatch,
+    EnrollmentInput,
+    EnrollRequest,
+    Metadata,
+    NameInput,
+    PresenceInput,
+    SSHSessionInput,
+)
 from .security import consume_enrollment, create_enrollment, map_oidc_user, require_admin
 
 log = logging.getLogger("jump")
@@ -131,6 +167,7 @@ def serialize_device(device: Device) -> dict:
         "group": {"id": str(device.group.id), "name": device.group.name} if device.group else None,
         "tags": [{"id": str(tag.id), "name": tag.name} for tag in device.tags],
         "online": device.online,
+        "ssh_host_key": device.ssh_host_key,
         "identity_state": (
             "revoked"
             if device.agent_identity and device.agent_identity.revoked_at
@@ -582,8 +619,435 @@ def reconcile(db: Session = Depends(get_db)):
     db.execute(
         update(Device).where(Device.online.is_(True)).values(online=False, connection_id=None)
     )
+    for session in db.scalars(
+        select(RemoteSession).where(RemoteSession.state.in_(["connecting", "active"]))
+    ).all():
+        finish_ssh_session(db, session, "service_restarted")
     db.commit()
     return {"ok": True}
+
+
+SSH_KINDS = {"linux_password", "linux_ssh_key"}
+SSH_ERRORS = {
+    "authentication_failed": "SSH authentication failed",
+    "ssh_unavailable": "SSH service unavailable on this device",
+    "timeout": "SSH connection timed out",
+    "host_key_mismatch": "SSH host key changed. An admin must verify and reset it.",
+    "device_disconnected": "Device disconnected",
+    "agent_unavailable": "Agent unavailable",
+    "unsupported_agent": "Update the Jump agent to enable browser SSH",
+    "unsupported_credential": "Unsupported SSH credential",
+    "session_expired": "Session expired",
+    "idle_timeout": "Session closed after 30 minutes of inactivity",
+    "session_closed": "SSH session ended",
+}
+
+
+def credential_output(item: Credential) -> dict:
+    return {"id": item.id, "label": item.label, "kind": item.kind, "username": item.username}
+
+
+@app.get("/api/devices/{device_id}/credentials")
+def list_credentials(
+    device_id: uuid.UUID, user: User = Depends(admin), db: Session = Depends(get_db)
+):
+    if not db.get(Device, device_id):
+        raise HTTPException(404)
+    return [
+        credential_output(c)
+        for c in db.scalars(select(Credential).where(Credential.device_id == device_id)).all()
+    ]
+
+
+@app.post("/api/devices/{device_id}/credentials", status_code=201)
+def add_credential(
+    device_id: uuid.UUID,
+    body: CredentialInput,
+    user: User = Depends(admin),
+    db: Session = Depends(get_db),
+):
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(404)
+    if device.os_family != "linux":
+        raise HTTPException(400, "SSH credentials require a Linux device")
+    secret_bytes = body.secret.encode()
+    if len(secret_bytes) > 16384:
+        raise HTTPException(400, "Credential is too large")
+    try:
+        item = create_credential(
+            db,
+            user,
+            device,
+            label=body.label,
+            kind=body.kind,
+            username=body.username,
+            secret=secret_bytes,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid credential") from exc
+    return credential_output(item)
+
+
+@app.post("/api/devices/{device_id}/ssh-host-key/reset")
+def reset_ssh_host_key(
+    device_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(admin),
+    db: Session = Depends(get_db),
+):
+    device = db.scalar(select(Device).where(Device.id == device_id).with_for_update())
+    if not device:
+        raise HTTPException(404)
+    if db.scalar(
+        select(RemoteSession.id).where(
+            RemoteSession.device_id == device_id,
+            (RemoteSession.state == "active")
+            | (
+                (RemoteSession.state == "connecting")
+                & (RemoteSession.created_at > now() - timedelta(seconds=60))
+            ),
+        )
+    ):
+        raise HTTPException(409, "Close active SSH sessions before resetting the host key")
+    device.ssh_host_key = None
+    db.add(
+        AuditEvent(
+            event_type="ssh_host_key_reset",
+            actor_user_id=user.id,
+            device_id=device_id,
+            request_id=request.state.request_id,
+        )
+    )
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/devices/{device_id}/ssh-sessions", status_code=201)
+def new_ssh_session(
+    device_id: uuid.UUID,
+    body: SSHSessionInput,
+    request: Request,
+    user: User = Depends(admin),
+    db: Session = Depends(get_db),
+):
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(404)
+    if not device.online or not device.connection_id:
+        raise HTTPException(409, "Device is offline")
+    if not device.agent_identity or device.agent_identity.revoked_at:
+        raise HTTPException(409, "Agent identity is revoked")
+    if device.os_family != "linux":
+        raise HTTPException(409, "Device does not support SSH")
+    if "ssh_terminal_v1" not in device.capabilities:
+        raise HTTPException(409, "Update the Jump agent to enable browser SSH")
+    credential = db.get(Credential, body.credential_id)
+    if not credential or credential.device_id != device_id:
+        raise HTTPException(400, "Credential does not belong to this device")
+    if credential.kind not in SSH_KINDS:
+        raise HTTPException(400, "Unsupported SSH credential")
+    session = RemoteSession(
+        id=uuid.uuid4(),
+        device_id=device_id,
+        user_id=user.id,
+        credential_id=credential.id,
+        columns=body.columns,
+        rows=body.rows,
+    )
+    db.add(session)
+    db.commit()
+    return {"id": session.id, "state": session.state, "created_at": session.created_at}
+
+
+def finish_ssh_session(db: Session, session: RemoteSession, reason: str | None = None) -> None:
+    if session.state in ("closed", "failed"):
+        return
+    was_active = session.state == "active"
+    session.state = (
+        "closed" if was_active and reason in (None, "session_closed", "idle_timeout") else "failed"
+    )
+    session.closed_at = now()
+    session.failure_reason = reason if session.state == "failed" else None
+    db.add(
+        AuditEvent(
+            event_type="ssh_session_ended" if session.state == "closed" else "ssh_session_failed",
+            actor_user_id=session.user_id,
+            device_id=session.device_id,
+            detail={
+                "session_id": str(session.id),
+                "credential_id": str(session.credential_id),
+                "reason": reason or "disconnected",
+            },
+        )
+    )
+    db.commit()
+
+
+def trust_ssh_host_key(db: Session, session: RemoteSession, fingerprint: str) -> bool:
+    if not isinstance(fingerprint, str) or not re.fullmatch(
+        r"SHA256:[A-Za-z0-9+/]{43}", fingerprint
+    ):
+        return False
+    device = db.scalar(select(Device).where(Device.id == session.device_id).with_for_update())
+    if (
+        not device
+        or not device.online
+        or not device.agent_identity
+        or device.agent_identity.revoked_at
+    ):
+        return False
+    if device.ssh_host_key and device.ssh_host_key != fingerprint:
+        return False
+    if not device.ssh_host_key:
+        device.ssh_host_key = fingerprint
+        db.add(
+            AuditEvent(
+                event_type="ssh_host_key_trusted",
+                actor_user_id=session.user_id,
+                device_id=device.id,
+                detail={"fingerprint": fingerprint, "session_id": str(session.id)},
+            )
+        )
+    db.commit()
+    return True
+
+
+@app.websocket("/ws/sessions/{session_id}")
+async def browser_ssh_session(ws: WebSocket, session_id: uuid.UUID, db: Session = Depends(get_db)):
+    # WebSocket upgrades bypass the HTTP CSRF middleware. Same-origin and the
+    # signed browser session are mandatory; the cookie alone is insufficient.
+    origin = ws.headers.get("origin")
+    if origin != cfg.public_url.rstrip("/"):
+        await ws.close(code=1008)
+        return
+    try:
+        uid = uuid.UUID(ws.session.get("uid", ""))
+    except ValueError:
+        await ws.close(code=1008)
+        return
+    session = db.get(RemoteSession, session_id)
+    user = db.get(User, uid)
+    if not user or not session or session.user_id != user.id or session.state != "connecting":
+        await ws.close(code=1008)
+        return
+    created_at = (
+        session.created_at.replace(tzinfo=UTC)
+        if session.created_at.tzinfo is None
+        else session.created_at
+    )
+    if created_at < now() - timedelta(seconds=60):
+        finish_ssh_session(db, session, "session_expired")
+        await ws.close(code=1008)
+        return
+    # Atomic claim blocks duplicate attaches across workers and processes.
+    claimed = db.execute(
+        update(RemoteSession)
+        .where(
+            RemoteSession.id == session_id,
+            RemoteSession.attached_at.is_(None),
+            RemoteSession.state == "connecting",
+        )
+        .values(attached_at=now())
+    )
+    db.commit()
+    if not claimed.rowcount:
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+    reason = "agent_unavailable"
+    backend = None
+    try:
+        device = db.get(Device, session.device_id)
+        credential = db.get(Credential, session.credential_id)
+        if (
+            not device
+            or not device.online
+            or not device.agent_identity
+            or device.agent_identity.revoked_at
+            or not credential
+        ):
+            raise RuntimeError("device_disconnected")
+        if "ssh_terminal_v1" not in device.capabilities:
+            raise RuntimeError("unsupported_agent")
+        secret = bytearray(decrypt_for_gateway(credential))
+        try:
+            address = (
+                cfg.broker_internal_url.rstrip("/")
+                .replace("http://", "ws://", 1)
+                .replace("https://", "wss://", 1)
+            )
+            backend = await ws_connect(
+                f"{address}/internal/sessions/{session.id}?device_id={device.id}",
+                additional_headers={"Authorization": "Bearer " + cfg.broker_internal_token},
+                max_size=65536,
+                open_timeout=10,
+                close_timeout=2,
+            )
+            await backend.send(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "type": "session_open",
+                        "session_id": str(session.id),
+                        "kind": credential.kind,
+                        "username": credential.username,
+                        "secret": base64.b64encode(secret).decode(),
+                        "host_key": device.ssh_host_key or "",
+                        "columns": session.columns,
+                        "rows": session.rows,
+                    }
+                )
+            )
+        finally:
+            secret[:] = b"\0" * len(secret)
+            del secret
+
+        first = json.loads(await asyncio.wait_for(backend.recv(), timeout=15))
+        if first.get("session_id") != str(session.id):
+            raise RuntimeError("agent_unavailable")
+        if first.get("type") == "session_error":
+            raise RuntimeError(
+                first.get("code") if first.get("code") in SSH_ERRORS else "agent_unavailable"
+            )
+        if first.get("type") != "session_opened" or not trust_ssh_host_key(
+            db, session, first.get("fingerprint", "")
+        ):
+            raise RuntimeError("host_key_mismatch")
+        session.state, session.connected_at, session.last_activity_at = "active", now(), now()
+        db.add(
+            AuditEvent(
+                event_type="ssh_session_started",
+                actor_user_id=user.id,
+                device_id=device.id,
+                detail={"session_id": str(session.id), "credential_id": str(credential.id)},
+            )
+        )
+        db.commit()
+        await ws.send_json(
+            {"type": "status", "state": "active", "fingerprint": device.ssh_host_key}
+        )
+        last_activity = time.monotonic()
+
+        async def browser_to_agent():
+            nonlocal last_activity
+            while True:
+                raw = await ws.receive_text()
+                if len(raw) > 16384:
+                    raise RuntimeError("session_closed")
+                frame = json.loads(raw)
+                if frame.get("type") == "session_data":
+                    data = base64.b64decode(frame.get("data", ""), validate=True)
+                    if len(data) > 8192:
+                        raise RuntimeError("session_closed")
+                    if data:
+                        last_activity = time.monotonic()
+                        session.last_activity_at = now()
+                        db.commit()
+                elif frame.get("type") == "session_resize":
+                    if not (
+                        20 <= frame.get("columns", 0) <= 500 and 5 <= frame.get("rows", 0) <= 200
+                    ):
+                        raise RuntimeError("session_closed")
+                elif frame.get("type") == "session_close":
+                    return "session_closed"
+                else:
+                    raise RuntimeError("session_closed")
+                frame.update(version=1, session_id=str(session.id))
+                await backend.send(json.dumps(frame))
+
+        async def agent_to_browser():
+            nonlocal last_activity
+            while True:
+                try:
+                    raw = await asyncio.wait_for(backend.recv(), timeout=5)
+                except TimeoutError:
+                    if time.monotonic() - last_activity >= cfg.ssh_idle_seconds:
+                        return "idle_timeout"
+                    continue
+                if len(raw) > 65536:
+                    return "session_closed"
+                frame = json.loads(raw)
+                if frame.get("session_id") != str(session.id):
+                    return "session_closed"
+                if frame.get("type") == "session_data":
+                    if len(base64.b64decode(frame.get("data", ""), validate=True)) > 8192:
+                        return "session_closed"
+                    last_activity = time.monotonic()
+                    session.last_activity_at = now()
+                    db.commit()
+                    await ws.send_json({"type": "session_data", "data": frame["data"]})
+                elif frame.get("type") == "session_close":
+                    return "session_closed"
+                elif frame.get("type") == "session_error":
+                    return (
+                        frame.get("code")
+                        if frame.get("code") in SSH_ERRORS
+                        else "agent_unavailable"
+                    )
+                else:
+                    return "session_closed"
+
+        tasks = [asyncio.create_task(browser_to_agent()), asyncio.create_task(agent_to_browser())]
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            reason = next(iter(done)).result()
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if reason == "idle_timeout":
+            db.add(
+                AuditEvent(
+                    event_type="ssh_session_idle_timeout",
+                    actor_user_id=user.id,
+                    device_id=device.id,
+                    detail={"session_id": str(session.id)},
+                )
+            )
+            db.commit()
+    except WebSocketDisconnect:
+        reason = "session_closed"
+    except ConnectionClosed:
+        reason = "device_disconnected"
+    except (TimeoutError, OSError):
+        reason = "timeout" if session.state == "connecting" else "agent_unavailable"
+    except (
+        RuntimeError,
+        ValueError,
+        TypeError,
+        AttributeError,
+        KeyError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        binascii.Error,
+    ) as exc:
+        reason = str(exc) if str(exc) in SSH_ERRORS else "agent_unavailable"
+    finally:
+        if backend:
+            try:
+                await backend.send(
+                    json.dumps(
+                        {"version": 1, "type": "session_close", "session_id": str(session.id)}
+                    )
+                )
+                await backend.close()
+            except (ConnectionClosed, OSError):
+                pass
+        finish_ssh_session(db, session, reason)
+        try:
+            await ws.send_json(
+                {
+                    "type": "status",
+                    "state": "closed",
+                    "code": reason,
+                    "message": SSH_ERRORS.get(reason, "Session disconnected"),
+                }
+            )
+            await ws.close()
+        except (RuntimeError, WebSocketDisconnect, OSError):
+            pass
 
 
 static_root = Path("/opt/jump/static")

@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     allowed_hosts: str = "localhost,127.0.0.1,jump"
     jump_server_version: str = "dev"
     jump_agent_version: str = ""
+    ssh_idle_seconds: int = 1800
 
     def validate_production(self) -> None:
         if self.jump_agent_version and not valid_release_tag(self.jump_agent_version):

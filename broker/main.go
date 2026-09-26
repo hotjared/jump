@@ -24,7 +24,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const maxMessage = 16 * 1024
+const maxMessage = 64 * 1024
 
 var pingInterval = 25 * time.Second
 var heartbeatTimeout = 65 * time.Second
@@ -37,16 +37,163 @@ type message struct {
 	Challenge    string          `json:"challenge,omitempty"`
 	Signature    string          `json:"signature,omitempty"`
 	Metadata     json.RawMessage `json:"metadata,omitempty"`
+	SessionID    string          `json:"session_id,omitempty"`
+	Kind         string          `json:"kind,omitempty"`
+	Username     string          `json:"username,omitempty"`
+	Secret       string          `json:"secret,omitempty"`
+	HostKey      string          `json:"host_key,omitempty"`
+	Fingerprint  string          `json:"fingerprint,omitempty"`
+	Code         string          `json:"code,omitempty"`
+	Data         string          `json:"data,omitempty"`
+	Columns      int             `json:"columns,omitempty"`
+	Rows         int             `json:"rows,omitempty"`
+}
+
+type sessionRoute struct {
+	deviceID string
+	agent    *websocket.Conn
+	frames   chan message
+	closed   chan struct{}
+	once     sync.Once
 }
 
 type broker struct {
-	api    string
-	token  string
-	client *http.Client
-	mu     sync.Mutex
-	active map[string]*websocket.Conn
-	limits map[string]window
-	wg     sync.WaitGroup
+	api      string
+	token    string
+	client   *http.Client
+	mu       sync.Mutex
+	active   map[string]*websocket.Conn
+	writers  sync.Map // *websocket.Conn -> *sync.Mutex
+	sessions map[string]*sessionRoute
+	limits   map[string]window
+	wg       sync.WaitGroup
+}
+
+func (b *broker) write(conn *websocket.Conn, value message) error {
+	lock, _ := b.writers.LoadOrStore(conn, &sync.Mutex{})
+	mu := lock.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	return conn.WriteJSON(value)
+}
+
+func (b *broker) closeRoute(id string, route *sessionRoute) {
+	route.once.Do(func() {
+		b.mu.Lock()
+		if b.sessions[id] == route {
+			delete(b.sessions, id)
+		}
+		b.mu.Unlock()
+		close(route.closed)
+	})
+}
+
+func (b *broker) agentFrame(conn *websocket.Conn, msg message) bool {
+	if len(msg.SessionID) != 36 || len(msg.Data) > 11000 ||
+		(msg.Type != "session_opened" && msg.Type != "session_error" && msg.Type != "session_data" && msg.Type != "session_close") {
+		return false
+	}
+	b.mu.Lock()
+	route := b.sessions[msg.SessionID]
+	b.mu.Unlock()
+	if route == nil || route.agent != conn {
+		return true // late frames cannot escape their closed session
+	}
+	select {
+	case route.frames <- msg:
+		return true
+	default:
+		b.closeRoute(msg.SessionID, route)
+		return true // close only the slow session; keep presence and other streams alive
+	}
+}
+
+// Only the backend on the private Compose network can open this authenticated
+// internal channel. One channel represents one logical SSH stream; the agent
+// still uses its single persistent, authenticated WebSocket.
+func (b *broker) internalSession(w http.ResponseWriter, r *http.Request) {
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+b.token)) != 1 {
+		http.Error(w, "unauthorized", 401)
+		return
+	}
+	id, deviceID := r.PathValue("id"), r.URL.Query().Get("device_id")
+	if len(id) != 36 || len(deviceID) != 36 || r.Header.Get("Origin") != "" {
+		http.Error(w, "invalid session", 400)
+		return
+	}
+	b.mu.Lock()
+	agent := b.active[deviceID]
+	_, exists := b.sessions[id]
+	b.mu.Unlock()
+	if agent == nil || exists {
+		http.Error(w, "agent unavailable", 409)
+		return
+	}
+	conn, err := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	conn.SetReadLimit(maxMessage)
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	var open message
+	if conn.ReadJSON(&open) != nil || open.Version != 1 || open.Type != "session_open" || open.SessionID != id ||
+		(open.Kind != "linux_password" && open.Kind != "linux_ssh_key") || len(open.Secret) > 24000 ||
+		len(open.Username) > 255 || open.Columns < 20 || open.Columns > 500 || open.Rows < 5 || open.Rows > 200 {
+		return
+	}
+	route := &sessionRoute{deviceID: deviceID, agent: agent, frames: make(chan message, 16), closed: make(chan struct{})}
+	b.mu.Lock()
+	if b.active[deviceID] != agent || b.sessions[id] != nil {
+		b.mu.Unlock()
+		return
+	}
+	if b.sessions == nil {
+		b.sessions = make(map[string]*sessionRoute)
+	}
+	b.sessions[id] = route
+	b.mu.Unlock()
+	defer func() {
+		b.closeRoute(id, route)
+		_ = b.write(agent, message{Version: 1, Type: "session_close", SessionID: id})
+	}()
+	if b.write(agent, open) != nil {
+		return
+	}
+	open.Secret = ""
+	conn.SetReadDeadline(time.Time{})
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		for {
+			var msg message
+			if conn.ReadJSON(&msg) != nil {
+				return
+			}
+			if msg.Version != 1 || msg.SessionID != id || len(msg.Data) > 11000 ||
+				(msg.Type != "session_data" && msg.Type != "session_resize" && msg.Type != "session_close") ||
+				(msg.Type == "session_resize" && (msg.Columns < 20 || msg.Columns > 500 || msg.Rows < 5 || msg.Rows > 200)) {
+				return
+			}
+			if b.write(agent, msg) != nil || msg.Type == "session_close" {
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-readDone:
+			return
+		case <-route.closed:
+			return
+		case msg := <-route.frames:
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if conn.WriteJSON(msg) != nil || msg.Type == "session_close" || msg.Type == "session_error" {
+				return
+			}
+		}
+	}
 }
 
 type window struct {
@@ -218,7 +365,17 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 		if b.active[id] == conn {
 			delete(b.active, id)
 		}
+		var routes []*sessionRoute
+		for _, route := range b.sessions {
+			if route.agent == conn {
+				routes = append(routes, route)
+			}
+		}
 		b.mu.Unlock()
+		for _, route := range routes {
+			b.closeRouteForAgent(route)
+		}
+		b.writers.Delete(conn)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := b.call(ctx, "POST", "/api/internal/devices/"+id+"/disconnected",
@@ -226,7 +383,7 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("disconnect update failed", "device_id", id, "error", err)
 		}
 	}()
-	if conn.WriteJSON(message{Version: 1, Type: "ready", ConnectionID: connectionID}) != nil {
+	if b.write(conn, message{Version: 1, Type: "ready", ConnectionID: connectionID}) != nil {
 		return
 	}
 	conn.SetReadDeadline(time.Now().Add(75 * time.Second))
@@ -243,8 +400,14 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 			if conn.ReadJSON(&msg) != nil {
 				return
 			}
-			if msg.Version != 1 || msg.Type != "heartbeat" {
+			if msg.Version != 1 {
 				return
+			}
+			if msg.Type != "heartbeat" {
+				if !b.agentFrame(conn, msg) {
+					return
+				}
+				continue
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			err := b.call(ctx, "POST", "/api/internal/devices/"+id+"/heartbeat",
@@ -266,12 +429,29 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 				slog.Warn("agent heartbeat timed out", "device_id", id)
 				return
 			}
+			lock, _ := b.writers.LoadOrStore(conn, &sync.Mutex{})
+			mu := lock.(*sync.Mutex)
+			mu.Lock()
 			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if conn.WriteMessage(websocket.PingMessage, nil) != nil {
+			err := conn.WriteMessage(websocket.PingMessage, nil)
+			mu.Unlock()
+			if err != nil {
 				return
 			}
 		}
 	}
+}
+
+func (b *broker) closeRouteForAgent(route *sessionRoute) {
+	b.mu.Lock()
+	for id, candidate := range b.sessions {
+		if candidate == route {
+			b.mu.Unlock()
+			b.closeRoute(id, route)
+			return
+		}
+	}
+	b.mu.Unlock()
 }
 
 // The control listener is private to the Compose network and additionally
@@ -312,7 +492,7 @@ func main() {
 		os.Exit(1)
 	}
 	b := &broker{api: strings.TrimRight(os.Getenv("JUMP_INTERNAL_URL"), "/"), token: token,
-		client: &http.Client{Timeout: 10 * time.Second}, active: make(map[string]*websocket.Conn)}
+		client: &http.Client{Timeout: 10 * time.Second}, active: make(map[string]*websocket.Conn), sessions: make(map[string]*sessionRoute)}
 	if b.api == "" {
 		slog.Error("JUMP_INTERNAL_URL is missing")
 		os.Exit(1)
@@ -342,6 +522,7 @@ func main() {
 	mux.HandleFunc("/connect", b.ws)
 	internalMux := http.NewServeMux()
 	internalMux.HandleFunc("POST /internal/devices/{id}/disconnect", b.disconnect)
+	internalMux.HandleFunc("GET /internal/sessions/{id}", b.internalSession)
 	internalServer := &http.Server{Addr: ":8081", Handler: internalMux, ReadHeaderTimeout: 5 * time.Second}
 	server := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	shutdown, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -69,3 +69,16 @@ class AuditOutput(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class CredentialInput(BaseModel):
+    label: str = Field(min_length=1, max_length=255)
+    kind: Literal["linux_password", "linux_ssh_key"]
+    username: str = Field(min_length=1, max_length=255)
+    secret: str = Field(min_length=1, max_length=16384)
+
+
+class SSHSessionInput(BaseModel):
+    credential_id: uuid.UUID
+    columns: int = Field(ge=20, le=500)
+    rows: int = Field(ge=5, le=200)
