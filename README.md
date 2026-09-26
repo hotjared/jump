@@ -1,6 +1,6 @@
 # Jump
 
-Jump is a self-hosted remote access foundation for a single environment. This first release provides OIDC sign-in, device enrollment, persistent outbound agent presence, device organization, and audit events. **Remote RDP, SSH, files, and actions are not implemented yet.**
+Jump is a self-hosted remote access foundation for a single environment. It provides OIDC sign-in, device enrollment, persistent outbound agent presence, device organization, audit events, and browser SSH terminals on Linux. RDP, files, and remote actions are not implemented yet.
 
 ## Components
 
@@ -76,3 +76,20 @@ Source builds report `dev`; release builds report the tag in the device metadata
 ## Status
 
 This is an early security-sensitive foundation. Review [known limitations](docs/architecture.md#known-limitations) before exposing it to the Internet.
+## Browser SSH sessions
+
+On an enrolled Linux device, open **Terminal**, save a password or unencrypted
+SSH private key credential, then choose it and select **Connect**. SSH must be
+installed and listening on `127.0.0.1:22` on that device. The agent opens the
+local SSH connection; no inbound Internet SSH port is needed.
+
+The path is browser → Jump session gateway → private broker → existing
+authenticated agent connection → localhost SSH. Multiple terminal sessions
+share the same agent connection. Saved secrets are encrypted at rest with
+`JUMP_MASTER_KEY` and decrypted only to initialize the selected session; they
+are never sent to the browser or stored by the agent. Jump trusts the first
+successfully authenticated SSH host key (TOFU) and shows its SHA256 fingerprint
+in Terminal. A changed key is rejected until an admin verifies it and resets
+the stored key. Sessions close after 30 minutes without input or output, or
+when the browser or agent disconnects. Terminal contents are not recorded;
+sessions cannot be resumed.

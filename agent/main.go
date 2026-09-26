@@ -56,6 +56,16 @@ type message struct {
 	Challenge    string   `json:"challenge,omitempty"`
 	Signature    string   `json:"signature,omitempty"`
 	Metadata     metadata `json:"metadata,omitempty"`
+	SessionID    string   `json:"session_id,omitempty"`
+	Kind         string   `json:"kind,omitempty"`
+	Username     string   `json:"username,omitempty"`
+	Secret       string   `json:"secret,omitempty"`
+	HostKey      string   `json:"host_key,omitempty"`
+	Fingerprint  string   `json:"fingerprint,omitempty"`
+	Code         string   `json:"code,omitempty"`
+	Data         string   `json:"data,omitempty"`
+	Columns      int      `json:"columns,omitempty"`
+	Rows         int      `json:"rows,omitempty"`
 }
 
 func info() metadata {
@@ -215,7 +225,7 @@ func connect(ctx context.Context, id identity) error {
 		return err
 	}
 	defer conn.Close()
-	conn.SetReadLimit(16 * 1024)
+	conn.SetReadLimit(64 * 1024)
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var challenge message
 	if err := conn.ReadJSON(&challenge); err != nil {
@@ -238,6 +248,8 @@ func connect(ctx context.Context, id identity) error {
 		return errors.New("authentication rejected")
 	}
 	slog.Info("connected", "device_id", id.DeviceID)
+	mux := &sshMux{conn: conn, streams: make(map[string]*sshStream)}
+	defer mux.closeAll()
 	conn.SetReadDeadline(time.Now().Add(75 * time.Second))
 	conn.SetPingHandler(func(data string) error {
 		conn.SetReadDeadline(time.Now().Add(75 * time.Second))
@@ -249,6 +261,10 @@ func connect(ctx context.Context, id identity) error {
 			var incoming message
 			if err := conn.ReadJSON(&incoming); err != nil {
 				done <- err
+				return
+			}
+			if incoming.Version != 1 || !mux.handle(incoming) {
+				done <- errors.New("invalid session frame")
 				return
 			}
 		}
@@ -263,8 +279,7 @@ func connect(ctx context.Context, id identity) error {
 		case err := <-done:
 			return err
 		case <-ticker.C:
-			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if err := conn.WriteJSON(message{Version: 1, Type: "heartbeat"}); err != nil {
+			if err := mux.send(message{Version: 1, Type: "heartbeat"}); err != nil {
 				return err
 			}
 		}

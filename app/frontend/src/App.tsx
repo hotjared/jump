@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { agentFilename, downloadFor, enrollmentCommand, type AgentDownloads, type Platform } from './agent-downloads'
 import { canDeleteDevice, deletionConfirmed, deletionName, deviceDeleteMethod } from './device-actions'
+import TerminalPanel from './TerminalPanel'
 
 type Named = { id: string; name: string }
 type Device = {
@@ -8,7 +9,7 @@ type Device = {
   os_family: string; os_version: string; architecture: string; agent_version: string;
   capabilities: string[]; addresses: string[]; primary_ip: string | null;
   current_user: string | null; group: Named | null; tags: Named[];
-  online: boolean; identity_state: "active" | "revoked" | "none"; last_seen_at: string | null; enrolled_at: string;
+  online: boolean; identity_state: "active" | "revoked" | "none"; last_seen_at: string | null; enrolled_at: string; ssh_host_key: string | null;
 }
 type User = { id: string; email: string; display_name: string; role: string; csrf: string }
 type Event = { id: string; event_type: string; created_at: string; device_id: string | null }
@@ -166,7 +167,7 @@ export default function App() {
               {user.role === 'admin' && <form onSubmit={e => { e.preventDefault(); action(async () => { await mutate('/api/tags', 'POST', { name: newTag }); setNewTag(''); await refresh(true) }) }}><input aria-label="New tag" placeholder="Tag name" value={newTag} onChange={e => setNewTag(e.target.value)} required /><button className="button">Add</button></form>}</section></div>
           <button className="button signout" onClick={() => action(async () => { await mutate('/api/logout', 'POST'); location.reload() })}>Sign out</button>
         </>}
-        {(page === 'Sessions' || page === 'Support Links') && <><div className="heading"><div><p className="eyebrow">COMING LATER</p><h1>{page}</h1></div></div><div className="placeholder"><span>◇</span><h2>{page} is coming in a later phase</h2><p>The foundation is ready; remote access is not enabled yet.</p></div></>}
+        {(page === 'Sessions' || page === 'Support Links') && <><div className="heading"><div><p className="eyebrow">COMING LATER</p><h1>{page}</h1></div></div><div className="placeholder"><span>◇</span><h2>{page} is coming in a later phase</h2><p>Open a Linux device and select Terminal to start SSH.</p></div></>}
       </div>
     </main>
     {device && <div className="overlay" onClick={() => setSelected(null)}><aside className="drawer" onClick={e => e.stopPropagation()}>
@@ -197,7 +198,7 @@ export default function App() {
             }
           }}>Delete device</button>}
         </section>
-      </div> : <div className="placeholder compact"><span>◇</span><h2>{tab} is not available yet</h2><p>Connection and action features arrive in a later phase.</p></div>}
+      </div> : tab === 'Terminal' ? <TerminalPanel key={device.id} device={device} admin={user.role === 'admin'} mutate={mutate} /> : <div className="placeholder compact"><span>◇</span><h2>{tab} is not available yet</h2><p>Connection and action features arrive in a later phase.</p></div>}
     </aside></div>}
     {enrolling && <div className="overlay" onClick={() => setEnrolling(false)}><div className="modal" onClick={e => e.stopPropagation()}><button className="close" aria-label="Close" onClick={() => setEnrolling(false)}>×</button><p className="eyebrow">NEW ENDPOINT</p><h2>Enroll a device</h2>
       {!issued && <><p>Choose the operating system, download its native agent, then generate a single-use token.</p><div className="platform">{(['linux','windows'] as Platform[]).map(v => <button key={v} type="button" aria-pressed={platform === v} className={platform === v ? 'chosen' : ''} onClick={() => setPlatform(v)}>{v === 'windows' ? '⊞  Windows amd64' : '⌘  Linux amd64'}</button>)}</div></>}

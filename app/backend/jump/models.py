@@ -86,6 +86,7 @@ class Device(Base):
         "Credential", cascade="all, delete-orphan", passive_deletes=True
     )
     online: Mapped[bool] = mapped_column(Boolean, default=False)
+    ssh_host_key: Mapped[str | None] = mapped_column(String(128))
     connection_id: Mapped[str | None] = mapped_column(String(36))
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     enrolled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
@@ -133,6 +134,26 @@ class Credential(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
     __table_args__ = (Index("ix_credentials_device", "device_id"),)
+
+
+class RemoteSession(Base):
+    __tablename__ = "remote_sessions"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    device_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"))
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    credential_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("credentials.id", ondelete="CASCADE")
+    )
+    state: Mapped[str] = mapped_column(String(16), default="connecting")
+    columns: Mapped[int] = mapped_column(Integer)
+    rows: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attached_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    failure_reason: Mapped[str | None] = mapped_column(String(64))
+    __table_args__ = (Index("ix_remote_sessions_device", "device_id"),)
 
 
 class AuditEvent(Base):

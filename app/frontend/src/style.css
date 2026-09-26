@@ -4,3 +4,10 @@
 
 .identity-control{margin-top:24px;padding:18px;border:1px solid #4a3032;border-radius:10px;background:#241a1c}.identity-control h3{font-size:13px;margin:0 0 8px}.identity-control p{color:#aeb0b3;font-size:12px;line-height:1.5;margin:0 0 14px}.revoke-button{border-color:#914b52;color:#f2aeb2;background:#352125}.revoke-button:hover{background:#49282c}
 .agent-download{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:18px 0 24px;padding:17px;border:1px solid #34383c;border-radius:10px;background:#141618}.agent-download>div{flex:1;min-width:190px}.agent-download strong,.agent-download span,.agent-download small{display:block}.agent-download strong{font-size:13px}.agent-download span,.agent-download small{color:#969ba2;font-size:11px;margin-top:5px}.agent-download p{width:100%;margin:0}.agent-download .subtle-link{font-size:12px;color:#cbd0d6}.agent-download small{width:100%}
+.terminal-panel { padding: 20px; overflow-y: auto; flex: 1; min-height: 0; }
+.terminal-controls { display: flex; gap: 8px; margin: 12px 0; }
+.terminal-controls select { min-width: 0; flex: 1; }
+.terminal-screen { height: 360px; min-height: 240px; background: #111318; padding: 8px; border-radius: 8px; }
+.ssh-credential-form { display: grid; gap: 10px; margin-top: 24px; }
+.ssh-credential-form textarea { min-height: 100px; font-family: monospace; }
+.fingerprint code { overflow-wrap: anywhere; }
