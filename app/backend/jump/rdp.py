@@ -440,7 +440,10 @@ async def rdp_gateway(
                 elif parts[0] == "ack":
                     if len(parts) != 4:
                         return "browser_disconnected"
-                    if parts[1] not in remote_streams.active | remote_streams.awaiting_ack:
+                    if (
+                        parts[1] not in remote_streams.active
+                        and parts[1] not in remote_streams.awaiting_ack
+                    ):
                         continue
                     remote_streams.awaiting_ack.discard(parts[1])
                 elif parts[0] not in {"key", "mouse", "size", "sync", "nop", "disconnect"}:
@@ -510,7 +513,10 @@ async def rdp_gateway(
                     if parts[0] == "ack":
                         if len(parts) != 4:
                             return "guacd_disconnected"
-                        if parts[1] not in browser_streams.active | browser_streams.awaiting_ack:
+                        if (
+                            parts[1] not in browser_streams.active
+                            and parts[1] not in browser_streams.awaiting_ack
+                        ):
                             continue
                         browser_streams.awaiting_ack.discard(parts[1])
                     if parts[0] not in {"log", "msg"}:
