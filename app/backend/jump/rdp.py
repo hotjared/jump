@@ -480,7 +480,7 @@ async def rdp_gateway(
                             guacd_error_class(parts),
                         )
                         return guacd_failure(parts)
-                    if parts[0] in {"clipboard", "blob", "end"}:
+                    if parts[0] == "clipboard":
                         try:
                             forward, reject = remote_streams.process(parts)
                         except ValueError:
@@ -497,6 +497,32 @@ async def rdp_gateway(
                             await guacd_writer.drain()
                         if not forward:
                             continue
+                    elif parts[0] in {"blob", "end"}:
+                        # Guacamole also uses blob/end for display image streams
+                        # introduced by instructions such as "img". Only run
+                        # clipboard validation for stream IDs that were actually
+                        # opened by a clipboard instruction. All other blob/end
+                        # traffic retains the pre-clipboard gateway behavior so
+                        # normal RDP display rendering can continue.
+                        if len(parts) > 1 and (
+                            parts[1] in remote_streams.active or parts[1] in remote_streams.ignored
+                        ):
+                            try:
+                                forward, reject = remote_streams.process(parts)
+                            except ValueError:
+                                return "guacd_disconnected"
+                            if reject:
+                                guacd_writer.write(
+                                    instruction(
+                                        "ack",
+                                        parts[1],
+                                        "Clipboard text unavailable or too large",
+                                        "783",
+                                    )
+                                )
+                                await guacd_writer.drain()
+                            if not forward:
+                                continue
                     if parts[0] in {
                         "file",
                         "pipe",

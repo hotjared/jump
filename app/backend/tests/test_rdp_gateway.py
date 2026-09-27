@@ -157,6 +157,11 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(
             writer.write(rdp.instruction("ready", "opaque-id"))
             writer.write(rdp.instruction("sync", "1"))
             if not ready_send_fails:
+                writer.write(rdp.instruction("img", "9", "15", "0", "image/png", "0", "0"))
+                writer.write(
+                    rdp.instruction("blob", "9", base64.b64encode(b"display bytes").decode())
+                )
+                writer.write(rdp.instruction("end", "9"))
                 writer.write(rdp.instruction("clipboard", "7", "text/plain"))
                 writer.write(
                     rdp.instruction("blob", "7", base64.b64encode(b"remote secret").decode())
@@ -307,6 +312,13 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(
                 assert rdp.parse_instruction(browser.sent[0])[0] == "ready"
                 assert ["", "ping", "12345"] in [rdp.parse_instruction(raw) for raw in browser.sent]
                 assert ["sync", "1"] in [rdp.parse_instruction(raw) for raw in browser.sent]
+                assert ["img", "9", "15", "0", "image/png", "0", "0"] in [
+                    rdp.parse_instruction(raw) for raw in browser.sent
+                ]
+                assert ["blob", "9", base64.b64encode(b"display bytes").decode()] in [
+                    rdp.parse_instruction(raw) for raw in browser.sent
+                ]
+                assert ["end", "9"] in [rdp.parse_instruction(raw) for raw in browser.sent]
                 assert ["clipboard", "7", "text/plain"] in [
                     rdp.parse_instruction(raw) for raw in browser.sent
                 ]
