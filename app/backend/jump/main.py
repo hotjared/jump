@@ -43,6 +43,7 @@ from .models import (
     Device,
     EnrollmentToken,
     Group,
+    QuickConnectPreference,
     RemoteSession,
     Tag,
     User,
@@ -58,6 +59,7 @@ from .schemas import (
     Metadata,
     NameInput,
     PresenceInput,
+    QuickConnectInput,
     RDPSessionInput,
     SSHSessionInput,
 )
@@ -872,6 +874,75 @@ def credential_output(item: Credential) -> dict:
         "kind": item.kind,
         "username": item.username,
         "domain": item.domain,
+    }
+
+
+@app.get("/api/quick-connect-preferences")
+def quick_connect_preferences(user: User = Depends(admin), db: Session = Depends(get_db)):
+    # A deleted credential cannot be returned even if an older database lacks FK enforcement.
+    rows = db.execute(
+        select(QuickConnectPreference, Credential)
+        .join(Credential, QuickConnectPreference.credential_id == Credential.id)
+        .where(QuickConnectPreference.user_id == user.id)
+    ).all()
+    return [
+        {
+            "device_id": preference.device_id,
+            "protocol": preference.protocol,
+            "credential_id": preference.credential_id,
+            "preferred": preference.preferred,
+        }
+        for preference, credential in rows
+        if credential.device_id == preference.device_id
+        and credential.kind
+        in ({"rdp": {"windows_password"}, "ssh": SSH_KINDS}.get(preference.protocol, set()))
+    ]
+
+
+@app.put("/api/devices/{device_id}/quick-connect-preferences")
+def save_quick_connect_preference(
+    device_id: uuid.UUID,
+    body: QuickConnectInput,
+    user: User = Depends(admin),
+    db: Session = Depends(get_db),
+):
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(404)
+    required_os, capability, kinds = (
+        ("windows", "rdp_tunnel_v1", {"windows_password"})
+        if body.protocol == "rdp"
+        else ("linux", "ssh_terminal_v1", SSH_KINDS)
+    )
+    if device.os_family != required_os or capability not in device.capabilities:
+        raise HTTPException(400, "Device does not support this connection")
+    credential = db.get(Credential, body.credential_id)
+    if not credential or credential.device_id != device_id or credential.kind not in kinds:
+        raise HTTPException(400, "Choose a compatible credential for this device")
+    key = (user.id, device_id, body.protocol)
+    preference = db.get(QuickConnectPreference, key)
+    if preference is None:
+        preference = QuickConnectPreference(
+            user_id=user.id, device_id=device_id, protocol=body.protocol
+        )
+        db.add(preference)
+    preference.credential_id = credential.id
+    preference.preferred = body.preferred
+    if body.preferred:
+        for other in db.scalars(
+            select(QuickConnectPreference).where(
+                QuickConnectPreference.user_id == user.id,
+                QuickConnectPreference.device_id == device_id,
+                QuickConnectPreference.protocol != body.protocol,
+            )
+        ):
+            other.preferred = False
+    db.commit()
+    return {
+        "device_id": device_id,
+        "protocol": body.protocol,
+        "credential_id": credential.id,
+        "preferred": preference.preferred,
     }
 
 

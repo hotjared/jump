@@ -90,3 +90,10 @@ class RDPSessionInput(BaseModel):
     width: int = Field(ge=320, le=7680)
     height: int = Field(ge=200, le=4320)
     dpi: int = Field(default=96, ge=72, le=300)
+
+
+class QuickConnectInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    protocol: Literal["rdp", "ssh"]
+    credential_id: uuid.UUID
+    preferred: bool = True
