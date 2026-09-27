@@ -27,14 +27,20 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
                 "disable-copy",
                 "disable-paste",
                 "disable-audio",
+                "enable-printing",
                 "resize-method",
             ]
             writer.write(rdp.instruction("args", *names))
             await writer.drain()
+            handshake = []
             while True:
                 _, frame = await rdp.read_instruction(reader)
+                handshake.append(frame)
                 if frame[0] == "connect":
                     break
+            assert ["size", "1280", "720", "96"] in handshake
+            assert ["audio"] in handshake and ["video"] in handshake
+            assert ["image", "image/png", "image/jpeg"] in handshake
             values = dict(zip(names, frame[1:], strict=True))
             seen.update(values)
             tunnel_reader, tunnel_writer = await asyncio.open_connection(
@@ -138,12 +144,15 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
             assert rdp.parse_instruction(browser.sent[0])[0] == "ready"
             assert ["", "ping", "12345"] in [rdp.parse_instruction(raw) for raw in browser.sent]
             assert ["sync", "1"] in [rdp.parse_instruction(raw) for raw in browser.sent]
+            assert seen["username"] == "Administrator"
             assert seen["password"] == "secret-password" and seen["domain"] == "LAB"
-            assert seen["security"] == "nla" and seen["ignore-cert"] == "true"
+            assert seen["security"] == "any" and seen["ignore-cert"] == "true"
             assert (
                 seen["enable-drive"] == "false"
                 and seen["disable-copy"] == "true"
                 and seen["disable-paste"] == "true"
+                and seen["disable-audio"] == "true"
+                and seen["enable-printing"] == "false"
             )
         finally:
             server.close()
