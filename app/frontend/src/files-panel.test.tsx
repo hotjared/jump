@@ -107,6 +107,45 @@ it('requires confirmation before overwriting and sends the explicit overwrite fl
   expect(new URL(FakeXHR.instances[0].url, location.origin).searchParams.get('overwrite')).toBe('true')
 })
 
+it('treats Linux filenames as case-sensitive for overwrite detection', async () => {
+  FakeXHR.instances = []
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith('/file-transfers') ? [] : {
+    entries: [{ name: 'Report.txt', type: 'file', size: 4, modified_at: '' }], more: false,
+  } })))
+  vi.stubGlobal('XMLHttpRequest', FakeXHR)
+  const confirm = vi.spyOn(window, 'confirm')
+  render(<FilesPanel device={device} csrf="token" />)
+  await screen.findByRole('button', { name: /Report.txt/ })
+  const file = new File(['data'], 'report.txt')
+  fireEvent.change(screen.getByLabelText('Choose file to upload'), { target: { files: [file] } })
+  expect(confirm).not.toHaveBeenCalled()
+  expect(FakeXHR.instances).toHaveLength(1)
+  expect(new URL(FakeXHR.instances[0].url, location.origin).searchParams.get('overwrite')).toBe('false')
+  confirm.mockRestore()
+})
+
+it('treats Windows filenames as case-insensitive for overwrite detection', async () => {
+  FakeXHR.instances = []
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ ok: true, json: async () => {
+    if (url.endsWith('/file-transfers')) return []
+    if (url.includes('path=C%3A%5C')) return {
+      entries: [{ name: 'Report.txt', type: 'file', size: 4, modified_at: '' }], more: false,
+    }
+    return { entries: [{ name: 'C:\\', type: 'directory', size: 0, modified_at: '' }], more: false }
+  } })))
+  vi.stubGlobal('XMLHttpRequest', FakeXHR)
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+  render(<FilesPanel device={{ ...device, os_family: 'windows' }} csrf="token" />)
+  fireEvent.click(await screen.findByRole('button', { name: /C:/i }))
+  await screen.findByRole('button', { name: /Report.txt/ })
+  const file = new File(['data'], 'report.txt')
+  fireEvent.change(screen.getByLabelText('Choose file to upload'), { target: { files: [file] } })
+  expect(confirm).toHaveBeenCalledWith('Overwrite report.txt on this device?')
+  expect(FakeXHR.instances).toHaveLength(1)
+  expect(new URL(FakeXHR.instances[0].url, location.origin).searchParams.get('overwrite')).toBe('true')
+  confirm.mockRestore()
+})
+
 it('shows transfer states and cancels only an active or pending transfer at its endpoint', async () => {
   const transfers = ['active', 'pending', 'completed', 'failed', 'cancelled'].map((state, index) => ({
     id: `transfer-${index}`, filename: `${state}.txt`, direction: index ? 'download' : 'upload',
