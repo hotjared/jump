@@ -326,7 +326,12 @@ async def rdp_gateway(
                 guacd_failure(first_guac) if first_guac[0] == "error" else "authentication_failed"
             )
         on_ready()
-        await browser.send_text(raw)
+        try:
+            await browser.send_text(raw)
+        except (WebSocketDisconnect, OSError, RuntimeError):
+            mark_close("browser_ready_send_failed")
+            logger.info("rdp browser ready send failed session=%s", session_id)
+            return "browser_disconnected"
 
         async def browser_to_guacd() -> str:
             while True:
@@ -424,10 +429,11 @@ async def rdp_gateway(
         )
         if listener:
             listener.close()
-            await listener.wait_closed()
         if bridge_task and not bridge_task.done():
             bridge_task.cancel()
             await asyncio.gather(bridge_task, return_exceptions=True)
+        if listener:
+            await listener.wait_closed()
         if guacd_writer:
             guacd_writer.close()
             await guacd_writer.wait_closed()

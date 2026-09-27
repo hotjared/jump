@@ -147,8 +147,11 @@ def test_old_agent_cannot_attach_even_after_session_creation(client, db, monkeyp
 
     monkeypatch.setattr("jump.main.rdp_gateway", forbidden)
     with client.websocket_connect(
-        f"/ws/rdp-sessions/{sid}", headers={"Host": "localhost", "Origin": ORIGIN}
+        f"/ws/rdp-sessions/{sid}",
+        headers={"Host": "localhost", "Origin": ORIGIN},
+        subprotocols=["guacamole"],
     ) as ws:
+        assert ws.accepted_subprotocol == "guacamole"
         assert "Update the Jump agent" in ws.receive_text()
     assert db.get(RemoteSession, uuid.UUID(sid)).state == "failed"
 
@@ -162,13 +165,28 @@ def test_ownership_update_conflict_and_guac_instruction_validation(client, db):
         with client.websocket_connect(
             f"/ws/rdp-sessions/{sid}",
             headers={"Host": "localhost", "Origin": "https://evil.example"},
+            subprotocols=["guacamole"],
         ):
             pass
     assert db.get(RemoteSession, uuid.UUID(sid)).attached_at is None
+    user.role = Role.USER
+    db.commit()
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            f"/ws/rdp-sessions/{sid}",
+            headers={"Host": "localhost", "Origin": ORIGIN},
+            subprotocols=["guacamole"],
+        ):
+            pass
+    assert db.get(RemoteSession, uuid.UUID(sid)).attached_at is None
+    user.role = Role.ADMIN
+    db.commit()
     other = as_user(client, db)
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect(
-            f"/ws/rdp-sessions/{sid}", headers={"Host": "localhost", "Origin": ORIGIN}
+            f"/ws/rdp-sessions/{sid}",
+            headers={"Host": "localhost", "Origin": ORIGIN},
+            subprotocols=["guacamole"],
         ):
             pass
     assert other.id != user.id
@@ -226,8 +244,11 @@ def test_attached_rdp_audits_start_and_end_without_secret(client, db, monkeypatc
 
     monkeypatch.setattr("jump.main.rdp_gateway", gateway)
     with client.websocket_connect(
-        f"/ws/rdp-sessions/{sid}", headers={"Host": "localhost", "Origin": ORIGIN}
+        f"/ws/rdp-sessions/{sid}",
+        headers={"Host": "localhost", "Origin": ORIGIN},
+        subprotocols=["other", "guacamole"],
     ) as ws:
+        assert ws.accepted_subprotocol == "guacamole"
         assert parse_instruction(ws.receive_text())[0] == "ready"
         assert parse_instruction(ws.receive_text())[0] == "disconnect"
     session = db.get(RemoteSession, uuid.UUID(sid))
@@ -235,6 +256,23 @@ def test_attached_rdp_audits_start_and_end_without_secret(client, db, monkeypatc
     events = list(db.scalars(select(AuditEvent).where(AuditEvent.event_type.like("rdp_session_%"))))
     assert [event.event_type for event in events] == ["rdp_session_started", "rdp_session_ended"]
     assert all("do-not-expose-me" not in str(event.detail) for event in events)
+
+
+def test_rdp_websocket_requires_guacamole_subprotocol_before_claim(client, db):
+    device = seed(db)
+    as_user(client, db)
+    cred = credential(client, device)
+    sid = create(client, device, cred).json()["id"]
+    for offered in ([], ["other"]):
+        with pytest.raises(WebSocketDisconnect) as rejected:
+            with client.websocket_connect(
+                f"/ws/rdp-sessions/{sid}",
+                headers={"Host": "localhost", "Origin": ORIGIN},
+                subprotocols=offered,
+            ):
+                pass
+        assert rejected.value.code == 1008
+        assert db.get(RemoteSession, uuid.UUID(sid)).attached_at is None
 
 
 def test_agent_update_blocked_while_rdp_active(client, db, monkeypatch):
