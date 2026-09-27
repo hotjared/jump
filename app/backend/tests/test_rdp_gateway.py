@@ -52,6 +52,20 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
             tunnel_writer.write(b"rdp request")
             await tunnel_writer.drain()
             assert await tunnel_reader.readexactly(12) == b"rdp response"
+            # The first connection closes the listener. A second connection
+            # cannot attach to the session even while the first stays open.
+            try:
+                second_reader, second_writer = await asyncio.open_connection(
+                    values["hostname"], int(values["port"])
+                )
+            except OSError:
+                pass
+            else:
+                try:
+                    assert await asyncio.wait_for(second_reader.read(1), timeout=1) == b""
+                finally:
+                    second_writer.close()
+                    await second_writer.wait_closed()
             writer.write(rdp.instruction("ready", "opaque-id"))
             writer.write(rdp.instruction("sync", "1"))
             await writer.drain()
@@ -65,6 +79,18 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
         monkeypatch.setattr(cfg, "guacd_host", "127.0.0.1")
         monkeypatch.setattr(cfg, "guacd_port", server.sockets[0].getsockname()[1])
         monkeypatch.setattr(cfg, "rdp_bridge_host", "127.0.0.1")
+        loop = asyncio.get_running_loop()
+        real_getaddrinfo = loop.getaddrinfo
+
+        async def getaddrinfo(host, port, *args, **kwargs):
+            addresses = await real_getaddrinfo(host, port, *args, **kwargs)
+            if host == cfg.guacd_host and port is None:
+                return [(*item[:4], ("192.0.2.55", *item[4][1:])) for item in addresses]
+            return addresses
+
+        # A DNS snapshot for the guacd service can differ from the source IP
+        # of its connection. The bridge must still accept the first peer.
+        monkeypatch.setattr(loop, "getaddrinfo", getaddrinfo)
         sid = str(uuid.uuid4())
 
         class Broker:
@@ -104,6 +130,8 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
 
         class Browser:
             def __init__(self):
+                # Browser-provided endpoint hints must never reach guacd.
+                self.query_params = {"hostname": "evil.example", "port": "3389"}
                 self.sent = []
                 self.ping_echoed = asyncio.Event()
                 self.synced = asyncio.Event()
@@ -151,8 +179,11 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
             assert seen["password"] == "secret-password" and seen["domain"] == "LAB"
             assert seen["security"] == "any" and seen["ignore-cert"] == "true"
             assert seen["hostname"] == "127.0.0.1"
+            assert seen["port"] != browser.query_params["port"]
             assert "guacd_to_agent_bytes=11 agent_to_guacd_bytes=12" in caplog.text
             assert "first_close=browser_disconnect" in caplog.text
+            assert "rdp bridge connection accepted" in caplog.text
+            assert "peer_ip=127.0.0.1 resolved_guacd_ips=['192.0.2.55']" in caplog.text
             assert "secret-password" not in caplog.text
             assert "rdp request" not in caplog.text
             assert (

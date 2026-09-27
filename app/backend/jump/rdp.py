@@ -166,13 +166,31 @@ async def rdp_gateway(
 
         async def inbound(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             peer = writer.get_extra_info("peername")
-            if accepted.done() or not peer or peer[0] not in guacd_ips:
+            peer_ip = peer[0] if peer else "unknown"
+            if accepted.done() or not peer:
+                logger.warning(
+                    "rdp bridge connection rejected session=%s peer_ip=%s resolved_guacd_ips=%s reason=%s",
+                    session_id,
+                    peer_ip,
+                    sorted(guacd_ips),
+                    "already_accepted" if accepted.done() else "missing_peer",
+                )
                 writer.close()
                 return
+            # The service-name DNS answer identifies a destination, not
+            # necessarily the source IP of guacd's separate TCP connection.
+            # This short-lived private listener accepts exactly one peer.
             accepted.set_result((reader, writer))
+            listener.close()
+            logger.info(
+                "rdp bridge connection accepted session=%s peer_ip=%s resolved_guacd_ips=%s",
+                session_id,
+                peer_ip,
+                sorted(guacd_ips),
+            )
 
-        # Ephemeral listener lives only on the private Compose network. It
-        # accepts one connection from the resolved guacd container address.
+        # Ephemeral listener is not published by Compose and closes on its
+        # first accepted connection.
         listener = await asyncio.start_server(inbound, "0.0.0.0", 0)
         port = listener.sockets[0].getsockname()[1]
         stage = "bridge_listening"
