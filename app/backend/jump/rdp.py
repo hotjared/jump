@@ -504,12 +504,8 @@ async def rdp_gateway(
                         # opened by a clipboard instruction. All other blob/end
                         # traffic retains the pre-clipboard gateway behavior so
                         # normal RDP display rendering can continue.
-                        if (
-                            len(parts) > 1
-                            and (
-                                parts[1] in remote_streams.active
-                                or parts[1] in remote_streams.ignored
-                            )
+                        if len(parts) > 1 and (
+                            parts[1] in remote_streams.active or parts[1] in remote_streams.ignored
                         ):
                             try:
                                 forward, reject = remote_streams.process(parts)
