@@ -242,6 +242,15 @@ async def rdp_gateway(
                 if len(raw) > 1024:
                     return "browser_disconnected"
                 parts = parse_instruction(raw)
+                # Guacamole.WebSocketTunnel sends an internal stability ping as
+                # soon as the socket opens (and periodically thereafter). It is
+                # handled by the WebSocket gateway, never by guacd. Rejecting
+                # it closes the session before the first display sync arrives.
+                if parts[0] == "":
+                    if len(parts) != 3 or parts[1] != "ping" or not parts[2].isdigit():
+                        return "browser_disconnected"
+                    await browser.send_text(raw)
+                    continue
                 if parts[0] not in {"key", "mouse", "size", "sync", "ack", "nop", "disconnect"}:
                     return "browser_disconnected"
                 guacd_writer.write(raw.encode())
