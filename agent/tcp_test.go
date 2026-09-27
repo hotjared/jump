@@ -10,6 +10,23 @@ import (
 )
 
 func TestRDPCapabilityAndLinuxRejection(t *testing.T) {
+	if rdpAddress != "127.0.0.1:3389" {
+		t.Fatal("RDP destination changed")
+	}
+	for _, test := range []struct {
+		os       string
+		expected bool
+	}{{"windows", true}, {"linux", false}} {
+		found := false
+		for _, c := range capabilitiesFor(test.os, "amd64") {
+			if c == "rdp_tunnel_v1" {
+				found = true
+			}
+		}
+		if found != test.expected {
+			t.Fatalf("RDP capability mismatch for %s", test.os)
+		}
+	}
 	has := false
 	for _, c := range info().Capabilities {
 		if c == "rdp_tunnel_v1" {

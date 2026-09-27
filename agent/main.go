@@ -77,6 +77,21 @@ type message struct {
 	Reason        string   `json:"reason,omitempty"`
 }
 
+func capabilitiesFor(goos, arch string) []string {
+	caps := []string{"filesystem", "system_info"}
+	if arch == "amd64" && (goos == "linux" || goos == "windows") {
+		caps = append(caps, "agent_update_v1")
+	}
+	if goos == "windows" {
+		return append(caps, "rdp", "rdp_tunnel_v1", "powershell")
+	}
+	caps = append(caps, "ssh", "shell")
+	if goos == "linux" {
+		caps = append(caps, "ssh_terminal_v1")
+	}
+	return caps
+}
+
 func info() metadata {
 	host, _ := os.Hostname()
 	current, _ := user.Current()
@@ -95,18 +110,7 @@ func info() metadata {
 			}
 		}
 	}
-	caps := []string{"filesystem", "system_info"}
-	if runtime.GOARCH == "amd64" && (runtime.GOOS == "linux" || runtime.GOOS == "windows") {
-		caps = append(caps, "agent_update_v1")
-	}
-	if runtime.GOOS == "windows" {
-		caps = append(caps, "rdp", "rdp_tunnel_v1", "powershell")
-	} else {
-		caps = append(caps, "ssh", "shell")
-		if runtime.GOOS == "linux" {
-			caps = append(caps, "ssh_terminal_v1")
-		}
-	}
+	caps := capabilitiesFor(runtime.GOOS, runtime.GOARCH)
 	username := ""
 	if current != nil {
 		username = current.Username
