@@ -679,18 +679,23 @@ async def download_file(
     async def stream():
         digest = hashlib.sha256()
         count = 0
+
+        def finish(frame: dict) -> None:
+            if (
+                frame.get("type") != "file_finished"
+                or frame.get("size") != count
+                or frame.get("sha256") != digest.hexdigest()
+                or count != transfer.expected_size
+            ):
+                raise RuntimeError("transfer_failed")
+            file_progress(db, transfer, count, force=True)
+            file_finish(db, transfer, "completed", digest=digest.hexdigest())
+
         try:
             while True:
                 frame = await file_receive(socket, transfer)
                 if frame.get("type") == "file_finished":
-                    if (
-                        frame.get("size") != count
-                        or frame.get("sha256") != digest.hexdigest()
-                        or count != transfer.expected_size
-                    ):
-                        raise RuntimeError("transfer_failed")
-                    file_progress(db, transfer, count, force=True)
-                    file_finish(db, transfer, "completed", digest=digest.hexdigest())
+                    finish(frame)  # An empty file has no chunks to acknowledge.
                     return
                 if frame.get("type") != "file_chunk":
                     raise RuntimeError("transfer_failed")
@@ -700,16 +705,23 @@ async def download_file(
                 digest.update(data)
                 count += len(data)
                 file_progress(db, transfer, count)
-                yield data
+                final = count == transfer.expected_size
+                if not final:
+                    yield data
                 await socket.send(
                     json.dumps({"version": 1, "type": "file_ack", "transfer_id": str(transfer.id)})
                 )
+                if final:
+                    finish(await file_receive(socket, transfer))
+                    yield data
+                    return
         except (
             RuntimeError,
             OSError,
             ConnectionClosed,
             TimeoutError,
             asyncio.CancelledError,
+            GeneratorExit,
             ValueError,
             binascii.Error,
         ):

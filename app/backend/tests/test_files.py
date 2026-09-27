@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import json
@@ -9,7 +10,7 @@ from test_api import as_user, write_headers
 
 from jump import main
 from jump.db import get_db
-from jump.models import AgentIdentity, AuditEvent, Device, Role
+from jump.models import AgentIdentity, AuditEvent, Device, FileTransfer, Role
 
 
 @pytest.fixture
@@ -237,6 +238,204 @@ def test_download_stream_and_safe_header(client, db, monkeypatch):
     assert (
         db.query(AuditEvent).filter(AuditEvent.event_type == "file_download_completed").count() == 1
     )
+
+
+def test_final_download_chunk_is_verified_before_yield(client, db, monkeypatch):
+    user = as_user(client, db)
+    target = device(db)
+    payload = b"verified download"
+    events = []
+
+    class DownloadSocket(Socket):
+        step = 0
+
+        async def send(self, value):
+            await super().send(value)
+            events.append(self.sent[-1]["type"])
+
+        async def recv(self):
+            self.step += 1
+            last = self.sent[-1]["type"]
+            if self.step == 1:
+                return json.dumps(
+                    {
+                        "version": 1,
+                        "transfer_id": self.id,
+                        "type": "file_opened",
+                        "size": len(payload),
+                    }
+                )
+            if last == "file_ack":
+                events.append("file_finished")
+                return json.dumps(
+                    {
+                        "version": 1,
+                        "transfer_id": self.id,
+                        "type": "file_finished",
+                        "size": len(payload),
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                    }
+                )
+            return json.dumps(
+                {
+                    "version": 1,
+                    "transfer_id": self.id,
+                    "type": "file_chunk",
+                    "data": base64.b64encode(payload).decode(),
+                }
+            )
+
+    sockets = []
+
+    async def socket(transfer):
+        result = DownloadSocket(transfer)
+        sockets.append(result)
+        return result
+
+    original_finish = main.file_finish
+
+    def finish(db, transfer, state, reason=None, digest=None):
+        original_finish(db, transfer, state, reason, digest)
+        if state == "completed":
+            assert transfer.sha256 == hashlib.sha256(payload).hexdigest()
+            events.append("completed")
+
+    monkeypatch.setattr(main, "file_socket", socket)
+    monkeypatch.setattr(main, "file_finish", finish)
+
+    async def consume():
+        response = await main.download_file(target.id, "/tmp/data", user, db)
+        stream = response.body_iterator
+        assert await anext(stream) == payload
+        events.append("yielded")
+        transfer = db.get(FileTransfer, uuid.UUID(sockets[0].id))
+        assert transfer.state == "completed"
+        # A browser can stop consuming as soon as it gets Content-Length bytes.
+        await stream.aclose()
+        assert sockets[0].closed
+        assert transfer.state == "completed"
+
+    asyncio.run(consume())
+    assert events == ["file_download_open", "file_ack", "file_finished", "completed", "yielded"]
+    assert db.query(AuditEvent).filter_by(event_type="file_download_completed").count() == 1
+    assert db.query(AuditEvent).filter_by(event_type="file_download_failed").count() == 0
+
+
+def test_download_cancel_before_verification_fails(client, db, monkeypatch):
+    user = as_user(client, db)
+    target = device(db)
+    payload = b"first chunk"
+
+    class DownloadSocket(Socket):
+        step = 0
+
+        async def recv(self):
+            self.step += 1
+            if self.step == 1:
+                frame = {"type": "file_opened", "size": len(payload) + 1}
+            else:
+                frame = {"type": "file_chunk", "data": base64.b64encode(payload).decode()}
+            return json.dumps({"version": 1, "transfer_id": self.id, **frame})
+
+    sockets = []
+
+    async def socket(transfer):
+        result = DownloadSocket(transfer)
+        sockets.append(result)
+        return result
+
+    monkeypatch.setattr(main, "file_socket", socket)
+
+    async def consume():
+        response = await main.download_file(target.id, "/tmp/data", user, db)
+        stream = response.body_iterator
+        assert await anext(stream) == payload
+        await stream.aclose()
+
+    asyncio.run(consume())
+    assert db.get(FileTransfer, uuid.UUID(sockets[0].id)).state == "failed"
+    assert db.query(AuditEvent).filter_by(event_type="file_download_failed").count() == 1
+    assert db.query(AuditEvent).filter_by(event_type="file_download_completed").count() == 0
+
+
+@pytest.mark.parametrize("invalid", ["size", "sha256"])
+def test_download_final_integrity_failure(client, db, monkeypatch, invalid):
+    user = as_user(client, db)
+    target = device(db)
+    payload = b"contents"
+
+    class DownloadSocket(Socket):
+        step = 0
+
+        async def recv(self):
+            self.step += 1
+            last = self.sent[-1]["type"]
+            if self.step == 1:
+                frame = {"type": "file_opened", "size": len(payload)}
+            elif last == "file_ack":
+                frame = {
+                    "type": "file_finished",
+                    "size": len(payload) + (invalid == "size"),
+                    "sha256": "0" * 64
+                    if invalid == "sha256"
+                    else hashlib.sha256(payload).hexdigest(),
+                }
+            else:
+                frame = {"type": "file_chunk", "data": base64.b64encode(payload).decode()}
+            return json.dumps({"version": 1, "transfer_id": self.id, **frame})
+
+    sockets = []
+
+    async def socket(transfer):
+        result = DownloadSocket(transfer)
+        sockets.append(result)
+        return result
+
+    monkeypatch.setattr(main, "file_socket", socket)
+
+    async def consume():
+        response = await main.download_file(target.id, "/tmp/data", user, db)
+        with pytest.raises(RuntimeError, match="transfer_failed"):
+            await anext(response.body_iterator)
+
+    asyncio.run(consume())
+    assert sockets[0].closed
+    assert db.get(FileTransfer, uuid.UUID(sockets[0].id)).state == "failed"
+    assert db.query(AuditEvent).filter_by(event_type="file_download_completed").count() == 0
+
+
+def test_zero_byte_download_completes(client, db, monkeypatch):
+    as_user(client, db)
+    target = device(db)
+    payload = b""
+    sockets = []
+
+    class DownloadSocket(Socket):
+        step = 0
+
+        async def recv(self):
+            self.step += 1
+            frame = {"version": 1, "transfer_id": self.id}
+            if self.step == 1:
+                frame.update(type="file_opened", size=0)
+            else:
+                frame.update(
+                    type="file_finished", size=0, sha256=hashlib.sha256(payload).hexdigest()
+                )
+            return json.dumps(frame)
+
+    async def socket(transfer):
+        result = DownloadSocket(transfer)
+        sockets.append(result)
+        return result
+
+    monkeypatch.setattr(main, "file_socket", socket)
+    response = client.get(f"/api/devices/{target.id}/files/download", params={"path": "/tmp/empty"})
+    assert response.status_code == 200
+    assert response.content == payload
+    assert response.headers["content-length"] == "0"
+    assert [frame["type"] for frame in sockets[0].sent] == ["file_download_open"]
+    assert db.get(FileTransfer, uuid.UUID(sockets[0].id)).state == "completed"
 
 
 def test_directory_claim_is_ephemeral_on_success_and_failure(client, db, monkeypatch):
