@@ -10,6 +10,10 @@ git clone -q https://github.com/apache/guacamole-server.git "$WORK/guacamole-ser
 cd "$WORK/guacamole-server"
 git checkout -q 1f664e08feae6e7d15d8146b78acab2e6fb470ae
 git apply "$ROOT/guacd/server-name.patch"
+# RDP has no dependency on libwebsockets. The upstream Dockerfile still COPYs
+# its output even when the optional build is disabled, so remove that COPY.
+grep -Fq 'COPY --from=libwebsockets ${PREFIX_DIR} ${PREFIX_DIR}' Dockerfile
+sed -i '/COPY --from=libwebsockets ${PREFIX_DIR} ${PREFIX_DIR}/d' Dockerfile
 docker build --build-arg FREERDP_VERSION=3 --build-arg WITH_FREERDP=3.17.2 \
   --build-arg WITH_LIBWEBSOCKETS=NO \
   --build-arg BUILD_JOBS=4 -t "${JUMP_GUACD_IMAGE:-jump-guacd:local}" .
