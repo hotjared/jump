@@ -510,7 +510,6 @@ async def list_files(
         frame = await file_receive(socket, transfer)
         if frame.get("type") != "file_list_result" or not isinstance(frame.get("entries"), list):
             raise RuntimeError("transfer_failed")
-        file_finish(db, transfer, "completed")
         return {
             "path": frame.get("path", path),
             "entries": frame["entries"],
@@ -518,11 +517,14 @@ async def list_files(
         }
     except Exception as exc:
         code = str(exc) if str(exc) in FILE_CODES else "transfer_failed"
-        file_finish(db, transfer, "failed", code)
         raise HTTPException(409, code) from None
     finally:
-        if socket:
-            await socket.close()
+        try:
+            if socket:
+                await socket.close()
+        finally:
+            db.delete(transfer)
+            db.commit()
 
 
 @app.get("/api/devices/{device_id}/file-transfers")

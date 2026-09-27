@@ -62,7 +62,11 @@ func fileError(err error) string {
 	}
 	return "transfer_failed"
 }
-func validPart(s string) bool {
+func validPosixPart(s string) bool {
+	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, "\x00/")
+}
+
+func validWindowsPart(s string) bool {
 	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, "\x00/\\:") && !strings.HasSuffix(s, ".") && !strings.HasSuffix(s, " ")
 }
 
@@ -74,7 +78,7 @@ func windowsLocalPath(path string) (string, string, bool) {
 	rel := strings.TrimSuffix(path[3:], "\\")
 	if rel != "" {
 		for _, part := range strings.Split(rel, "\\") {
-			if !validPart(part) {
+			if !validWindowsPart(part) {
 				return "", "", false
 			}
 		}
@@ -99,13 +103,13 @@ func fileRoot(path string) (*os.Root, string, error) {
 		root, err := os.OpenRoot(drive)
 		return root, strings.ReplaceAll(rel, "\\", string(filepath.Separator)), err
 	}
-	if !strings.HasPrefix(path, "/") || strings.Contains(path, "\\") {
+	if !strings.HasPrefix(path, "/") {
 		return nil, "", os.ErrInvalid
 	}
 	rel := strings.Trim(path, "/")
 	if rel != "" {
 		for _, part := range strings.Split(rel, "/") {
-			if !validPart(part) {
+			if !validPosixPart(part) {
 				return nil, "", os.ErrInvalid
 			}
 		}
@@ -222,7 +226,11 @@ func (m *fileMux) list(msg message) {
 	_ = m.send(message{Version: 1, Type: "file_list_result", TransferID: msg.TransferID, Path: msg.Path, Entries: entries, More: more, Offset: msg.Offset})
 }
 func (m *fileMux) upload(msg message) {
-	if !validPart(msg.Name) || msg.Size < 0 {
+	validName := validPosixPart(msg.Name)
+	if runtime.GOOS == "windows" {
+		validName = validWindowsPart(msg.Name)
+	}
+	if !validName || msg.Size < 0 {
 		m.reply(msg.TransferID, "file_error", "invalid_path")
 		return
 	}
@@ -332,7 +340,12 @@ func (m *fileMux) finish(msg message) {
 	stream.mu.Lock()
 	code := ""
 	sum := ""
-	if stream.file == nil || stream.received != stream.size {
+	select {
+	case <-stream.cancelled:
+		code = "transfer_failed"
+	default:
+	}
+	if code != "" || stream.file == nil || stream.received != stream.size {
 		code = "transfer_failed"
 	} else if err := stream.file.Sync(); err != nil {
 		code = "transfer_failed"
@@ -427,6 +440,11 @@ func (m *fileMux) download(msg message) {
 			n, e := stream.file.Read(buf)
 			stream.mu.Unlock()
 			if n > 0 {
+				select {
+				case <-stream.cancelled:
+					return
+				default:
+				}
 				hash.Write(buf[:n])
 				count += int64(n)
 				if m.send(message{Version: 1, Type: "file_chunk", TransferID: msg.TransferID, Data: base64.StdEncoding.EncodeToString(buf[:n])}) != nil {
@@ -449,6 +467,11 @@ func (m *fileMux) download(msg message) {
 		if count != stat.Size() {
 			m.reply(msg.TransferID, "file_error", "transfer_failed")
 			return
+		}
+		select {
+		case <-stream.cancelled:
+			return
+		default:
 		}
 		_ = m.send(message{Version: 1, Type: "file_finished", TransferID: msg.TransferID, Size: count, SHA256: hex.EncodeToString(hash.Sum(nil))})
 	}()

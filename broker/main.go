@@ -231,6 +231,26 @@ func (b *broker) closeFileRoute(id string, route *sessionRoute) {
 	})
 }
 
+func (b *broker) closeFilesForAgent(conn *websocket.Conn) {
+	b.mu.Lock()
+	var routes []struct {
+		id    string
+		route *sessionRoute
+	}
+	for id, route := range b.files {
+		if route.agent == conn {
+			routes = append(routes, struct {
+				id    string
+				route *sessionRoute
+			}{id, route})
+		}
+	}
+	b.mu.Unlock()
+	for _, item := range routes {
+		b.closeFileRoute(item.id, item.route)
+	}
+}
+
 func (b *broker) cancelFile(w http.ResponseWriter, r *http.Request) {
 	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+b.token)) != 1 || r.Header.Get("Origin") != "" {
 		http.Error(w, "unauthorized", 401)
@@ -307,7 +327,7 @@ func (b *broker) internalFile(w http.ResponseWriter, r *http.Request) {
 			count++
 		}
 	}
-	if b.active[deviceID] != agent || b.connections[deviceID] != connectionID || b.files[id] != nil || !b.fileCapabilities[deviceID] || count >= 4 {
+	if b.active[deviceID] != agent || b.connections[deviceID] != connectionID || b.files[id] != nil || !b.fileCapabilities[deviceID] || count >= 4 || b.updating[deviceID] {
 		b.mu.Unlock()
 		return
 	}
@@ -349,6 +369,11 @@ func (b *broker) internalFile(w http.ResponseWriter, r *http.Request) {
 		case <-route.closed:
 			return
 		case msg := <-route.frames:
+			select {
+			case <-route.closed:
+				return
+			default:
+			}
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if conn.WriteJSON(msg) != nil || msg.Type == "file_finished" || msg.Type == "file_error" || msg.Type == "file_list_result" {
 				return
@@ -396,6 +421,12 @@ func (b *broker) agentUpdate(w http.ResponseWriter, r *http.Request) {
 	conn := b.active[id]
 	busy := false
 	for _, route := range b.sessions {
+		if route.deviceID == id {
+			busy = true
+			break
+		}
+	}
+	for _, route := range b.files {
 		if route.deviceID == id {
 			busy = true
 			break
@@ -874,18 +905,6 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var routes []*sessionRoute
-		var fileRoutes []struct {
-			id    string
-			route *sessionRoute
-		}
-		for transferID, route := range b.files {
-			if route.agent == conn {
-				fileRoutes = append(fileRoutes, struct {
-					id    string
-					route *sessionRoute
-				}{transferID, route})
-			}
-		}
 		for _, route := range b.sessions {
 			if route.agent == conn {
 				routes = append(routes, route)
@@ -895,9 +914,7 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 		for _, route := range routes {
 			b.closeRouteForAgent(route)
 		}
-		for _, item := range fileRoutes {
-			b.closeFileRoute(item.id, item.route)
-		}
+		b.closeFilesForAgent(conn)
 		b.writers.Delete(conn)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

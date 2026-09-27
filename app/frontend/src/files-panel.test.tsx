@@ -48,3 +48,82 @@ it('shows Windows fixed drives in This PC and opens a selected drive', async () 
   await screen.findByRole('button', { name: /Users/i })
   expect(fetch).toHaveBeenCalledWith(expect.stringContaining('path=C%3A%5C'), expect.anything())
 })
+
+class FakeXHR {
+  static instances: FakeXHR[] = []
+  upload: { onprogress: ((event: ProgressEvent) => void) | null } = { onprogress: null }
+  onload: (() => void) | null = null
+  onerror: (() => void) | null = null
+  onabort: (() => void) | null = null
+  url = ''
+  body: File | null = null
+  headers: Record<string, string> = {}
+  withCredentials = false
+  status = 200
+  constructor() { FakeXHR.instances.push(this) }
+  open(method: string, url: string) { expect(method).toBe('POST'); this.url = url }
+  setRequestHeader(name: string, value: string) { this.headers[name] = value }
+  send(file: File) { this.body = file }
+  abort() { this.onabort?.() }
+}
+
+function fileFetch(existing = false, transfers: object[] = []) {
+  return vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith('/file-transfers') ? transfers : {
+    entries: existing ? [{ name: 'report:2026.txt', type: 'file', size: 4, modified_at: '' }] : [], more: false,
+  } }))
+}
+
+it('uploads the selected file with path, name, size, CSRF, and no implicit overwrite; shows progress', async () => {
+  FakeXHR.instances = []
+  vi.stubGlobal('fetch', fileFetch())
+  vi.stubGlobal('XMLHttpRequest', FakeXHR)
+  render(<FilesPanel device={device} csrf="token" />)
+  await screen.findByText('This directory is empty.')
+  const file = new File(['payload'], 'report:2026.txt')
+  fireEvent.change(screen.getByLabelText('Choose file to upload'), { target: { files: [file] } })
+  const request = FakeXHR.instances[0]
+  expect(request.body).toBe(file)
+  expect(new URL(request.url, location.origin).searchParams).toEqual(new URLSearchParams({ path: '/', filename: file.name, size: '7', overwrite: 'false' }))
+  expect(request.headers).toMatchObject({ 'Content-Type': 'application/octet-stream', 'X-CSRF-Token': 'token' })
+  expect(request.withCredentials).toBe(true)
+  expect(screen.getByRole('status').textContent).toContain('0%')
+  request.upload.onprogress?.({ lengthComputable: true, loaded: 3, total: 4 } as ProgressEvent)
+  await screen.findByText('Sending upload: 75%')
+})
+
+it('requires confirmation before overwriting and sends the explicit overwrite flag', async () => {
+  FakeXHR.instances = []
+  vi.stubGlobal('fetch', fileFetch(true))
+  vi.stubGlobal('XMLHttpRequest', FakeXHR)
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true)
+  render(<FilesPanel device={device} csrf="token" />)
+  await screen.findByRole('button', { name: /report:2026.txt/ })
+  const picker = screen.getByLabelText('Choose file to upload')
+  const file = new File(['data'], 'report:2026.txt')
+  fireEvent.change(picker, { target: { files: [file] } })
+  expect(confirm).toHaveBeenCalledWith('Overwrite report:2026.txt on this device?')
+  expect(FakeXHR.instances).toHaveLength(0)
+  fireEvent.change(picker, { target: { files: [file] } })
+  expect(new URL(FakeXHR.instances[0].url, location.origin).searchParams.get('overwrite')).toBe('true')
+})
+
+it('shows transfer states and cancels only an active or pending transfer at its endpoint', async () => {
+  const transfers = ['active', 'pending', 'completed', 'failed', 'cancelled'].map((state, index) => ({
+    id: `transfer-${index}`, filename: `${state}.txt`, direction: index ? 'download' : 'upload',
+    state, transferred_bytes: 2, expected_size: 4, failure_reason: state === 'failed' ? 'permission_denied' : null,
+  }))
+  const fetch = fileFetch(false, transfers)
+  vi.stubGlobal('fetch', fetch)
+  render(<FilesPanel device={device} csrf="token" />)
+  await screen.findByText('cancelled.txt')
+  for (const state of ['active', 'pending', 'completed', 'failed', 'cancelled']) {
+    expect(screen.getByText(new RegExp(`· ${state} ·`))).toBeTruthy()
+  }
+  expect(screen.getByText('permission denied')).toBeTruthy()
+  expect(screen.getAllByRole('button', { name: 'Cancel' })).toHaveLength(2)
+  fireEvent.click(screen.getAllByRole('button', { name: 'Cancel' })[1])
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/file-transfers/transfer-1/cancel', expect.objectContaining({
+    method: 'POST', headers: expect.objectContaining({ 'X-CSRF-Token': 'token' }),
+  })))
+  await waitFor(() => expect(screen.getAllByRole('button', { name: 'Cancel' })).toHaveLength(1))
+})

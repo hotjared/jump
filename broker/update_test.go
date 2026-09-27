@@ -71,6 +71,15 @@ func TestAgentUpdateIsPrivateAndConnectionBound(t *testing.T) {
 		t.Fatalf("active session: %d", got)
 	}
 	delete(b.sessions, "session")
+	fileRoute := &sessionRoute{deviceID: deviceID, agent: conn, closed: make(chan struct{})}
+	b.files = map[string]*sessionRoute{"file-transfer": fileRoute}
+	if got := call(deviceID, validToken).Code; got != 409 {
+		t.Fatalf("active file transfer: %d", got)
+	}
+	b.closeFileRoute("file-transfer", fileRoute)
+	if b.files["file-transfer"] != nil {
+		t.Fatal("file route remained after cleanup")
+	}
 	if got := call(deviceID, validToken).Code; got != 204 {
 		t.Fatalf("delivery: %d", got)
 	}

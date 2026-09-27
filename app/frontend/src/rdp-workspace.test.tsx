@@ -46,4 +46,22 @@ describe('RDP workspace', () => {
     await waitFor(() => { expect(paste).toHaveBeenCalledOnce(); expect(copy).toHaveBeenCalledOnce() })
     view.unmount()
   })
+
+  it('opens the device Files UI from RDP without disconnecting and retains clipboard actions', () => {
+    const session = new RdpSession('id', 'device', 'WIN', 'windows')
+    session.state = 'connected'
+    const detach = vi.fn()
+    vi.spyOn(session, 'attach').mockReturnValue(detach)
+    const openFiles = vi.fn()
+    const close = vi.fn()
+    const view = render(<SessionWorkspace sessions={[session]} activeId={session.id} select={() => {}} close={close}
+      fileDevices={['device']} openFiles={openFiles} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Files' }))
+    expect(openFiles).toHaveBeenCalledExactlyOnceWith('device')
+    expect(close).not.toHaveBeenCalled()
+    expect(detach).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Paste to Remote' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Copy from Remote' })).toBeTruthy()
+    view.unmount()
+  })
 })

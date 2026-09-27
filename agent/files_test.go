@@ -38,6 +38,34 @@ func TestFileCapability(t *testing.T) {
 		}
 	}
 }
+func TestCancelledDownloadStopsAfterFirstChunk(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux temp paths")
+	}
+	path := filepath.Join(t.TempDir(), "large.bin")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), fileChunkSize*3), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mux, frames := harness()
+	mux.handle(message{Type: "file_download_open", TransferID: testID, Path: path})
+	if got := response(t, frames); got.Type != "file_opened" {
+		t.Fatal(got)
+	}
+	if got := response(t, frames); got.Type != "file_chunk" {
+		t.Fatal(got)
+	}
+	mux.handle(message{Type: "file_cancel", TransferID: testID})
+	mux.handle(message{Type: "file_cancel", TransferID: testID})
+	mux.handle(message{Type: "file_ack", TransferID: testID})
+	if len(mux.streams) != 0 {
+		t.Fatal("cancelled download route remained active")
+	}
+	select {
+	case got := <-frames:
+		t.Fatalf("download emitted after cancellation: %s", got.Type)
+	case <-time.After(20 * time.Millisecond):
+	}
+}
 func TestFileRoundTrip(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux temp paths")
@@ -205,5 +233,59 @@ func TestWindowsNamespaceParsing(t *testing.T) {
 	drive, rel, ok := windowsLocalPath(`c:\Users\Public`)
 	if !ok || drive != `C:\` || rel != `Users\Public` {
 		t.Fatal(drive, rel, ok)
+	}
+}
+
+func TestPosixNamesDoNotUseWindowsRules(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("POSIX filenames")
+	}
+	dir := t.TempDir()
+	mux, frames := harness()
+	defer mux.closeAll()
+	names := []string{"report:2026.txt", "name.", "name ", `back\slash`}
+	for i, name := range names {
+		if !validPosixPart(name) || validWindowsPart(name) {
+			t.Fatalf("validation mismatch: %q", name)
+		}
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("listed"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		mux.handle(message{Type: "file_download_open", TransferID: fmt.Sprintf("%08d-1111-1111-1111-111111111111", i), Path: path})
+		if got := response(t, frames); got.Type != "file_opened" {
+			t.Fatal(got)
+		}
+		if got := response(t, frames); got.Type != "file_chunk" {
+			t.Fatal(got)
+		} else {
+			mux.handle(message{Type: "file_ack", TransferID: got.TransferID})
+		}
+		if got := response(t, frames); got.Type != "file_finished" {
+			t.Fatal(got)
+		}
+	}
+	mux.handle(message{Type: "file_list", TransferID: testID, Path: dir})
+	listed := response(t, frames)
+	if listed.Type != "file_list_result" || len(listed.Entries) != len(names) {
+		t.Fatal(listed)
+	}
+	for i, name := range names {
+		id := fmt.Sprintf("%08d-2222-2222-2222-222222222222", i)
+		target := "copy-" + name
+		mux.handle(message{Type: "file_upload_open", TransferID: id, Path: dir, Name: target, Size: 1})
+		if got := response(t, frames); got.Type != "file_opened" {
+			t.Fatal(got)
+		}
+		mux.handle(message{Type: "file_chunk", TransferID: id, Data: base64.StdEncoding.EncodeToString([]byte("X"))})
+		response(t, frames)
+		mux.handle(message{Type: "file_finish", TransferID: id})
+		if got := response(t, frames); got.Type != "file_finished" {
+			t.Fatal(got)
+		}
+		content, err := os.ReadFile(filepath.Join(dir, target))
+		if err != nil || string(content) != "X" {
+			t.Fatal(name, err)
+		}
 	}
 }

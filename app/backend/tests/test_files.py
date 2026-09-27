@@ -237,3 +237,135 @@ def test_download_stream_and_safe_header(client, db, monkeypatch):
     assert (
         db.query(AuditEvent).filter(AuditEvent.event_type == "file_download_completed").count() == 1
     )
+
+
+def test_directory_claim_is_ephemeral_on_success_and_failure(client, db, monkeypatch):
+    from sqlalchemy import func, select
+
+    from jump.models import FileTransfer
+
+    as_user(client, db)
+    target = device(db)
+    observed = []
+    failing = False
+
+    class ListingSocket(Socket):
+        async def recv(self):
+            if failing:
+                return json.dumps(
+                    {
+                        "version": 1,
+                        "transfer_id": self.id,
+                        "type": "file_error",
+                        "code": "permission_denied",
+                    }
+                )
+            return await super().recv()
+
+    async def socket(transfer):
+        observed.append(
+            db.scalar(
+                select(func.count())
+                .select_from(FileTransfer)
+                .where(FileTransfer.direction == "list")
+            )
+        )
+        return ListingSocket(transfer)
+
+    monkeypatch.setattr(main, "file_socket", socket)
+    url = f"/api/devices/{target.id}/files"
+    for _ in range(4):
+        assert client.get(url, params={"path": "/tmp"}).status_code == 200
+        assert db.scalar(select(func.count()).select_from(FileTransfer)) == 0
+    failing = True
+    assert client.get(url, params={"path": "/tmp"}).json()["detail"] == "permission_denied"
+    assert db.scalar(select(func.count()).select_from(FileTransfer)) == 0
+    assert observed == [1] * 5
+
+
+def test_directory_claim_removed_when_request_is_cancelled(client, db, monkeypatch):
+    import asyncio
+
+    from sqlalchemy import func, select
+
+    from jump.models import FileTransfer
+
+    user = as_user(client, db)
+    target = device(db)
+
+    async def cancelled_socket(transfer):
+        assert db.get(FileTransfer, transfer.id) is not None
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(main, "file_socket", cancelled_socket)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(main.list_files(target.id, "/", 0, user, db))
+    assert db.scalar(select(func.count()).select_from(FileTransfer)) == 0
+
+
+def test_cancel_owner_audit_and_idempotence(client, db, monkeypatch):
+    from jump.models import FileTransfer
+
+    owner = as_user(client, db)
+    target = device(db)
+    transfer = main.file_record(db, owner, target, "upload", "/tmp", "secret.bin", 999)
+    other = as_user(client, db)
+    cancel_url = f"/api/file-transfers/{transfer.id}/cancel"
+    assert other.id != owner.id
+    assert client.post(cancel_url, headers=write_headers()).status_code == 404
+    assert db.get(FileTransfer, transfer.id).state == "pending"
+    # Restore the original signed browser session for the owner.
+    from itsdangerous import TimestampSigner
+
+    state = base64.b64encode(json.dumps({"uid": str(owner.id), "csrf": "test-csrf"}).encode())
+    client.cookies.set(
+        "jump_session",
+        TimestampSigner("test-session-secret-at-least-32-characters").sign(state).decode(),
+    )
+    calls = []
+
+    class BrokerClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", BrokerClient)
+    first = client.post(cancel_url, headers=write_headers())
+    assert first.status_code == 200, first.text
+    assert first.json()["state"] == "cancelled"
+    assert first.json()["failure_reason"] == "transfer_cancelled"
+    assert calls[0][0].endswith(f"/internal/file-streams/{transfer.id}/cancel")
+    assert calls[0][1]["json"] == {"device_id": str(target.id), "user_id": str(owner.id)}
+    assert client.post(cancel_url, headers=write_headers()).json()["state"] == "cancelled"
+    assert len(calls) == 1
+    audit = db.query(AuditEvent).filter(AuditEvent.event_type == "file_upload_cancelled").all()
+    assert len(audit) == 1
+    assert audit[0].detail["reason"] == "transfer_cancelled"
+    assert "secret contents" not in json.dumps(audit[0].detail)
+    assert "secret contents" not in json.dumps(main.file_output(transfer), default=str)
+    completed = main.file_record(db, owner, target, "download", "/tmp/done", "done", 5)
+    main.file_finish(db, completed, "completed", digest="a" * 64)
+    assert (
+        client.post(f"/api/file-transfers/{completed.id}/cancel", headers=write_headers()).json()[
+            "state"
+        ]
+        == "completed"
+    )
+    assert len(calls) == 1
+
+
+def test_transfer_size_columns_are_bigint():
+    from sqlalchemy import BigInteger
+
+    from jump.models import FileTransfer
+
+    assert isinstance(FileTransfer.__table__.c.expected_size.type, BigInteger)
+    assert isinstance(FileTransfer.__table__.c.transferred_bytes.type, BigInteger)
