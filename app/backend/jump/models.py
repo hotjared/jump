@@ -136,6 +136,21 @@ class Credential(Base):
     __table_args__ = (Index("ix_credentials_device", "device_id"),)
 
 
+class QuickConnectPreference(Base):
+    __tablename__ = "quick_connect_preferences"
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    device_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"), primary_key=True
+    )
+    protocol: Mapped[str] = mapped_column(String(16), primary_key=True)
+    credential_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("credentials.id", ondelete="CASCADE")
+    )
+    preferred: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class RemoteSession(Base):
     __tablename__ = "remote_sessions"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)

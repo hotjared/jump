@@ -180,7 +180,7 @@ def main():
                 "online": False,
                 "last_seen": None,
                 "revoked": False,
-                "revision": "0004",
+                "revision": "0005",
             }
 
             script = (

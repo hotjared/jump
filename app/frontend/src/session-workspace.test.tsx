@@ -70,8 +70,10 @@ beforeEach(() => {
     requests.push(input)
     if (input === '/api/me') return response({ id: 'admin', email: 'admin@example.com', display_name: 'Admin', role: 'admin', csrf: 'csrf' })
     if (input === '/api/devices') return response(devices)
+    if (input === '/api/quick-connect-preferences') return response([])
     if (input === '/api/groups' || input === '/api/tags' || input === '/api/audit') return response([])
     if (input.endsWith('/credentials') && !init?.method) return response([{ id: 'cred', label: 'Owner', username: 'owner', kind: 'linux_password' }])
+    if (input.endsWith('/quick-connect-preferences') && init?.method === 'PUT') return response({ device_id: 'docker01', protocol: 'ssh', credential_id: 'cred', preferred: true })
     if (input.endsWith('/ssh-sessions') && init?.method === 'POST') return response({ id: `ssh-${++nextSession}` })
     throw new Error(`Unexpected request: ${input}`)
   }))
@@ -99,6 +101,40 @@ async function connectDevice(id: string) {
 }
 
 describe('session workspace', () => {
+
+  it('uses named columns and keeps Quick Connect separate from Device Details', async () => {
+    render(<App />)
+    const details = await screen.findByRole('button', { name: 'Details for docker01' })
+    const row = details.closest('.device-row')!
+    const columns = ['device', 'status', 'user', 'group', 'last-seen', 'connect']
+    const heading = document.querySelector('.table-heading')!
+    for (const column of columns) {
+      expect(heading.querySelector(`.device-col-${column}`)).not.toBeNull()
+      expect(row.querySelector(`.device-col-${column}`)).not.toBeNull()
+    }
+    fireEvent.click(within(row as HTMLElement).getByRole('button', { name: 'Quick Connect options for docker01' }))
+    expect(screen.queryByText('DEVICE DETAILS')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Connect with SSH' })).toBeTruthy()
+    fireEvent.click(details)
+    expect(screen.getByText('DEVICE DETAILS')).toBeTruthy()
+  })
+
+  it('starts Quick Connect in the background and opens only when its tab is clicked', async () => {
+    render(<App />)
+    await screen.findAllByRole('button', { name: 'Connect SSH' })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Connect SSH' })[0])
+    fireEvent.change(await screen.findByRole('combobox', { name: 'Quick Connect credential' }), { target: { value: 'cred' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    await waitFor(() => expect(FakeSocket.instances.length).toBe(1))
+    FakeSocket.instances[0].emit({ type: 'status', state: 'active', fingerprint: 'SHA256:trusted' })
+    const tab = await screen.findByRole('tab', { name: /docker01 SSH/ })
+    expect(tab.getAttribute('aria-selected')).toBe('false')
+    expect(screen.getByRole('heading', { name: /Devices/ })).toBeTruthy()
+    expect(document.querySelector('.content')?.hasAttribute('hidden')).toBe(false)
+    fireEvent.click(tab)
+    expect(tab.getAttribute('aria-selected')).toBe('true')
+    expect(document.querySelector('.content')?.hasAttribute('hidden')).toBe(true)
+  })
 
   it('deduplicates terminal resizes, ignores hidden tabs, and resizes once when shown again', async () => {
     render(<App />)
