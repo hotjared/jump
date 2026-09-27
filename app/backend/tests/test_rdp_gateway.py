@@ -166,11 +166,15 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(
             if not ready_send_fails:
                 received = [(await rdp.read_instruction(reader))[1] for _ in range(4)]
                 assert received == [
+                    ["ack", "7", "OK", "0"],
                     ["clipboard", "8", "text/plain"],
                     ["blob", "8", base64.b64encode(b"local secret").decode()],
                     ["end", "8"],
-                    ["disconnect"],
                 ]  # The internal ping never reaches guacd.
+                writer.write(rdp.instruction("ack", "8", "OK", "0"))
+                await writer.drain()
+                _, disconnected = await rdp.read_instruction(reader)
+                assert disconnected == ["disconnect"]
             await reader.read()
             tunnel_writer.close()
             writer.close()
@@ -236,6 +240,7 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(
                 self.ping_echoed = asyncio.Event()
                 self.synced = asyncio.Event()
                 self.remote_ended = asyncio.Event()
+                self.local_ack_received = asyncio.Event()
                 self.next_frame = 0
 
             async def send_text(self, raw):
@@ -249,19 +254,24 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(
                     self.synced.set()
                 if parts == ["end", "7"]:
                     self.remote_ended.set()
+                if parts == ["ack", "8", "OK", "0"]:
+                    self.local_ack_received.set()
 
             async def receive_text(self):
                 if not self.ping_echoed.is_set():
                     return rdp.instruction("", "ping", "12345").decode()
                 await self.synced.wait()
                 frames = [
+                    rdp.instruction("ack", "7", "OK", "0"),
                     rdp.instruction("clipboard", "8", "text/plain"),
                     rdp.instruction("blob", "8", base64.b64encode(b"local secret").decode()),
                     rdp.instruction("end", "8"),
                     rdp.instruction("disconnect"),
                 ]
-                if self.next_frame == 3:
+                if self.next_frame == 0:
                     await self.remote_ended.wait()
+                if self.next_frame == 4:
+                    await self.local_ack_received.wait()
                 frame = frames[self.next_frame]
                 self.next_frame += 1
                 return frame.decode()
