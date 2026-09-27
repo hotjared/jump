@@ -57,7 +57,10 @@ func TestCancelledDownloadStopsAfterFirstChunk(t *testing.T) {
 	mux.handle(message{Type: "file_cancel", TransferID: testID})
 	mux.handle(message{Type: "file_cancel", TransferID: testID})
 	mux.handle(message{Type: "file_ack", TransferID: testID})
-	if len(mux.streams) != 0 {
+	mux.mu.Lock()
+	remaining := len(mux.streams)
+	mux.mu.Unlock()
+	if remaining != 0 {
 		t.Fatal("cancelled download route remained active")
 	}
 	select {
