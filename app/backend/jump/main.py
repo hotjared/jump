@@ -429,6 +429,11 @@ def file_failure(frame: dict) -> str:
     return code if code in FILE_CODES else "transfer_failed"
 
 
+def file_download_name(path: str, os_family: str) -> str:
+    separator = "\\" if os_family == "windows" else "/"
+    return path.rstrip(separator).rsplit(separator, 1)[-1]
+
+
 async def file_socket(transfer: FileTransfer):
     address = (
         cfg.broker_internal_url.rstrip("/")
@@ -637,7 +642,7 @@ async def download_file(
     device_id: uuid.UUID, path: str, user: User = Depends(admin), db: Session = Depends(get_db)
 ):
     device = file_device(db, device_id)
-    filename = path.replace("\\", "/").rstrip("/").split("/")[-1]
+    filename = file_download_name(path, device.os_family)
     if not filename or filename in (".", "..") or any(c in filename for c in "\r\n\x00"):
         raise HTTPException(400, "invalid_path")
     transfer = file_record(db, user, device, "download", path, filename)
