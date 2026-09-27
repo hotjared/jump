@@ -341,6 +341,7 @@ def request_agent_update(
     if latest := latest_update(db, device.id):
         if latest.state in UPDATE_ACTIVE:
             raise HTTPException(409, "An agent update is already running")
+    expire_pending_rdp(db, device.id)
     active = db.scalar(
         select(RemoteSession.id)
         .where(
@@ -496,6 +497,7 @@ def delete_device(
         raise HTTPException(409, "Revoke the agent identity before deleting this device")
     if item.online:
         raise HTTPException(409, "Device must be offline before deletion")
+    expire_pending_rdp(db, device_id)
     if db.scalar(
         select(RemoteSession.id).where(
             RemoteSession.device_id == device_id, RemoteSession.state.in_(["connecting", "active"])
@@ -1091,6 +1093,20 @@ def finish_remote_session(db: Session, session: RemoteSession, reason: str | Non
         )
     )
     db.commit()
+
+
+def expire_pending_rdp(db: Session, device_id: uuid.UUID) -> None:
+    abandoned = db.scalars(
+        select(RemoteSession).where(
+            RemoteSession.device_id == device_id,
+            RemoteSession.protocol == "rdp",
+            RemoteSession.state == "connecting",
+            RemoteSession.attached_at.is_(None),
+            RemoteSession.created_at < now() - timedelta(seconds=60),
+        )
+    ).all()
+    for session in abandoned:
+        finish_remote_session(db, session, "session_expired")
 
 
 def finish_ssh_session(db: Session, session: RemoteSession, reason: str | None = None) -> None:

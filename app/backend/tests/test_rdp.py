@@ -7,7 +7,7 @@ from starlette.websockets import WebSocketDisconnect
 from test_api import BROKER, ORIGIN, as_user, write_headers
 
 from jump.db import get_db
-from jump.main import app, finish_remote_session
+from jump.main import app, expire_pending_rdp, finish_remote_session
 from jump.models import (
     AgentIdentity,
     AgentUpdate,
@@ -281,3 +281,18 @@ def test_private_stream_authorization_binds_session_owner_device_and_agent(clien
         ).status_code
         == 403
     )
+
+
+def test_unattached_rdp_session_expires_before_update_conflict(client, db):
+    from datetime import timedelta
+
+    device = seed(db)
+    as_user(client, db)
+    cred = credential(client, device)
+    sid = create(client, device, cred).json()["id"]
+    session = db.get(RemoteSession, uuid.UUID(sid))
+    session.created_at = now() - timedelta(minutes=2)
+    db.commit()
+    expire_pending_rdp(db, device.id)
+    assert session.state == "failed" and session.failure_reason == "session_expired"
+    assert db.scalar(select(AuditEvent).where(AuditEvent.event_type == "rdp_session_failed"))
