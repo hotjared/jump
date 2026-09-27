@@ -57,7 +57,9 @@ export default function FilesPanel({ device, csrf }: { device: Device; csrf: str
 
   function startUpload(file: File) {
     if (!path) return
-    const existing = entries.find(entry => entry.name.toLowerCase() === file.name.toLowerCase())
+    const existing = entries.find(entry => windows
+      ? entry.name.toLowerCase() === file.name.toLowerCase()
+      : entry.name === file.name)
     if (existing?.type === 'directory') { setError('A directory already has that name.'); return }
     const overwrite = Boolean(existing)
     if (overwrite && !window.confirm(`Overwrite ${file.name} on this device?`)) return
