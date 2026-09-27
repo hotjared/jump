@@ -157,9 +157,7 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(
             writer.write(rdp.instruction("ready", "opaque-id"))
             writer.write(rdp.instruction("sync", "1"))
             if not ready_send_fails:
-                writer.write(
-                    rdp.instruction("img", "9", "15", "0", "image/png", "0", "0")
-                )
+                writer.write(rdp.instruction("img", "9", "15", "0", "image/png", "0", "0"))
                 writer.write(
                     rdp.instruction("blob", "9", base64.b64encode(b"display bytes").decode())
                 )
