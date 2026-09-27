@@ -62,6 +62,17 @@ def split_instruction(buffer: str) -> tuple[str, list[str], str] | None:
         offset = end + 1
 
 
+def guacd_failure(parts: list[str]) -> str:
+    code = parts[2] if len(parts) > 2 else ""
+    if code in {"769", "771"}:
+        return "authentication_failed"
+    if code in {"514", "522", "776"}:
+        return "session_timeout"
+    if code in {"519", "520"}:
+        return "rdp_unavailable"
+    return "guacd_disconnected"
+
+
 async def read_instruction(reader: asyncio.StreamReader) -> tuple[str, list[str]]:
     # Handshake instructions are small and contain only ASCII parameter names.
     raw = await asyncio.wait_for(reader.readuntil(b";"), timeout=20)
@@ -220,9 +231,7 @@ async def rdp_gateway(
         raw, first_guac = await read_instruction(guacd_reader)
         if first_guac[0] != "ready":
             return (
-                "authentication_failed"
-                if first_guac[0] in {"error", "require"}
-                else "rdp_unavailable"
+                guacd_failure(first_guac) if first_guac[0] == "error" else "authentication_failed"
             )
         on_ready()
         await browser.send_text(raw)
@@ -258,11 +267,7 @@ async def rdp_gateway(
                 while parsed := split_instruction(pending):
                     raw, parts, pending = parsed
                     if parts[0] == "error":
-                        return (
-                            "authentication_failed"
-                            if len(parts) > 2 and parts[2] in {"769", "771"}
-                            else "guacd_disconnected"
-                        )
+                        return guacd_failure(parts)
                     if parts[0] in {
                         "clipboard",
                         "file",
