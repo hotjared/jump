@@ -3,7 +3,10 @@ import { agentFilename, downloadFor, enrollmentCommand, type AgentDownloads, typ
 import { canDeleteDevice, deletionConfirmed, deletionName, deviceDeleteMethod } from './device-actions'
 import AgentUpdatePanel, { type UpdateInfo } from './AgentUpdatePanel'
 import { SshSession } from './ssh-session'
+import { RdpSession } from './rdp-session'
+import type { WorkspaceSession } from './SessionWorkspace'
 const TerminalPanel = lazy(() => import('./TerminalPanel'))
+const RemotePanel = lazy(() => import('./RemotePanel'))
 const SessionWorkspace = lazy(() => import('./SessionWorkspace'))
 
 type Named = { id: string; name: string }
@@ -41,7 +44,7 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null)
   const [authPending, setAuthPending] = useState(true)
   const [page, setPage] = useState<Page>('Devices')
-  const [sessions, setSessions] = useState<SshSession[]>([])
+  const [sessions, setSessions] = useState<WorkspaceSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [devices, setDevices] = useState<Device[]>([])
   const [groups, setGroups] = useState<Named[]>([])
@@ -93,7 +96,7 @@ export default function App() {
   const online = devices.filter(d => d.online).length
   const activeSession = sessions.find(session => session.id === activeSessionId)
 
-  function openSession(session: SshSession) {
+  function openSession(session: WorkspaceSession) {
     // A disconnected tab may be replaced by a fresh connection to the same device.
     sessions.filter(old => old.deviceId === session.deviceId).forEach(old => old.disconnect())
     setSessions(previous => [...previous.filter(old => old.deviceId !== session.deviceId), session])
@@ -156,7 +159,7 @@ export default function App() {
       <div className="sidebar-bottom"><div className="avatar">{user.display_name[0]?.toUpperCase()}</div><div><strong>{user.display_name}</strong><small>{user.role}</small></div></div>
     </aside>
     <main className="main">
-      <header className="topbar"><div className="breadcrumbs">Workspace <span>/</span> <strong>{activeSession ? activeSession.name + ' · SSH' : page}</strong></div><div className="top-right"><span className="live-dot" /> System ready</div></header>
+      <header className="topbar"><div className="breadcrumbs">Workspace <span>/</span> <strong>{activeSession ? activeSession.name + ' · ' + activeSession.protocol : page}</strong></div><div className="top-right"><span className="live-dot" /> System ready</div></header>
       <Suspense fallback={null}><SessionWorkspace sessions={sessions} activeId={activeSessionId} select={id => { setActiveSessionId(id); setSelected(null) }} close={closeSession} /></Suspense>
       <div className="content" hidden={Boolean(activeSessionId)}>
         {error && <div className="error" role="alert">{error}<button onClick={() => setError('')}>×</button></div>}
@@ -223,8 +226,11 @@ export default function App() {
             }
           }}>Delete device</button>}
         </section>
-      </div> : tab === 'Terminal' ? <Suspense fallback={<div className="placeholder compact">Loading terminal…</div>}><TerminalPanel key={device.id} device={device} admin={user.role === 'admin'} mutate={mutate}
-        existing={sessions.find(session => session.deviceId === device.id)} onConnected={openSession}
+      </div> : tab === 'Remote' ? <Suspense fallback={<div className="placeholder compact">Loading remote desktop…</div>}><RemotePanel key={device.id} device={device} admin={user.role === 'admin'} mutate={mutate}
+        existing={sessions.find((session): session is RdpSession => session.deviceId === device.id && session.protocol === 'RDP')} onConnected={openSession}
+        onOpenExisting={() => { const session = sessions.find(item => item.deviceId === device.id && item.protocol === 'RDP'); if (session) { setActiveSessionId(session.id); setSelected(null) } }} /></Suspense>
+      : tab === 'Terminal' ? <Suspense fallback={<div className="placeholder compact">Loading terminal…</div>}><TerminalPanel key={device.id} device={device} admin={user.role === 'admin'} mutate={mutate}
+        existing={sessions.find((session): session is SshSession => session.deviceId === device.id && session.protocol === 'SSH')} onConnected={openSession}
         onOpenExisting={() => { const session = sessions.find(item => item.deviceId === device.id); if (session) { setActiveSessionId(session.id); setSelected(null) } }} /></Suspense> : <div className="placeholder compact"><span>◇</span><h2>{tab} is not available yet</h2><p>Connection and action features arrive in a later phase.</p></div>}
     </aside></div>}
     {enrolling && <div className="overlay" onClick={() => setEnrolling(false)}><div className="modal" onClick={e => e.stopPropagation()}><button className="close" aria-label="Close" onClick={() => setEnrolling(false)}>×</button><p className="eyebrow">NEW ENDPOINT</p><h2>Enroll a device</h2>

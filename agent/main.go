@@ -100,7 +100,7 @@ func info() metadata {
 		caps = append(caps, "agent_update_v1")
 	}
 	if runtime.GOOS == "windows" {
-		caps = append(caps, "rdp", "powershell")
+		caps = append(caps, "rdp", "rdp_tunnel_v1", "powershell")
 	} else {
 		caps = append(caps, "ssh", "shell")
 		if runtime.GOOS == "linux" {
@@ -265,6 +265,9 @@ func connect(ctx context.Context, id identity) error {
 	slog.Info("connected", "device_id", id.DeviceID)
 	mux := &sshMux{conn: conn, streams: make(map[string]*sshStream)}
 	defer mux.closeAll()
+	tcpContext, stopTCP := context.WithCancel(ctx)
+	tcp := &tcpMux{send: mux.send, ctx: tcpContext, cancel: stopTCP, streams: make(map[string]*tcpStream)}
+	defer tcp.closeAll()
 	conn.SetReadDeadline(time.Now().Add(75 * time.Second))
 	conn.SetPingHandler(func(data string) error {
 		conn.SetReadDeadline(time.Now().Add(75 * time.Second))
@@ -292,7 +295,7 @@ func connect(ctx context.Context, id identity) error {
 				}
 				continue
 			}
-			if incoming.Version != 1 || !mux.handle(incoming) {
+			if incoming.Version != 1 || !(tcp.handle(incoming) || mux.handle(incoming)) {
 				done <- errors.New("invalid session frame")
 				return
 			}

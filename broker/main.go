@@ -60,6 +60,8 @@ type message struct {
 
 type sessionRoute struct {
 	deviceID string
+	protocol string
+	ownerID  string
 	agent    *websocket.Conn
 	frames   chan message
 	closed   chan struct{}
@@ -67,19 +69,20 @@ type sessionRoute struct {
 }
 
 type broker struct {
-	api          string
-	token        string
-	client       *http.Client
-	mu           sync.Mutex
-	active       map[string]*websocket.Conn
-	connections  map[string]string
-	capabilities map[string]bool
-	updates      map[string]*websocket.Conn
-	updating     map[string]bool
-	writers      sync.Map // *websocket.Conn -> *sync.Mutex
-	sessions     map[string]*sessionRoute
-	limits       map[string]window
-	wg           sync.WaitGroup
+	api             string
+	token           string
+	client          *http.Client
+	mu              sync.Mutex
+	active          map[string]*websocket.Conn
+	connections     map[string]string
+	capabilities    map[string]bool
+	rdpCapabilities map[string]bool
+	updates         map[string]*websocket.Conn
+	updating        map[string]bool
+	writers         sync.Map // *websocket.Conn -> *sync.Mutex
+	sessions        map[string]*sessionRoute
+	limits          map[string]window
+	wg              sync.WaitGroup
 }
 
 func (b *broker) write(conn *websocket.Conn, value message) error {
@@ -133,13 +136,14 @@ func (b *broker) agentFrame(conn *websocket.Conn, msg message) bool {
 		return true
 	}
 	if len(msg.SessionID) != 36 || len(msg.Data) > 11000 ||
-		(msg.Type != "session_opened" && msg.Type != "session_error" && msg.Type != "session_data" && msg.Type != "session_close") {
+		(msg.Type != "session_opened" && msg.Type != "session_error" && msg.Type != "session_data" && msg.Type != "session_close" &&
+			msg.Type != "tcp_opened" && msg.Type != "tcp_error" && msg.Type != "tcp_data" && msg.Type != "tcp_close") {
 		return false
 	}
 	b.mu.Lock()
 	route := b.sessions[msg.SessionID]
 	b.mu.Unlock()
-	if route == nil || route.agent != conn {
+	if route == nil || route.agent != conn || ((strings.HasPrefix(msg.Type, "tcp_")) != (route.protocol == "rdp")) {
 		return true // late frames cannot escape their closed session
 	}
 	select {
@@ -283,7 +287,7 @@ func (b *broker) internalSession(w http.ResponseWriter, r *http.Request) {
 		len(open.Username) > 255 || open.Columns < 20 || open.Columns > 500 || open.Rows < 5 || open.Rows > 200 {
 		return
 	}
-	route := &sessionRoute{deviceID: deviceID, agent: agent, frames: make(chan message, 16), closed: make(chan struct{})}
+	route := &sessionRoute{deviceID: deviceID, protocol: "ssh", agent: agent, frames: make(chan message, 16), closed: make(chan struct{})}
 	b.mu.Lock()
 	if b.active[deviceID] != agent || b.sessions[id] != nil || b.updating[deviceID] {
 		b.mu.Unlock()
@@ -330,6 +334,88 @@ func (b *broker) internalSession(w http.ResponseWriter, r *http.Request) {
 		case msg := <-route.frames:
 			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if conn.WriteJSON(msg) != nil || msg.Type == "session_close" || msg.Type == "session_error" {
+				return
+			}
+		}
+	}
+}
+
+// This private, bearer-authenticated channel routes one fixed-purpose RDP
+// stream. It never accepts a destination address or port.
+func (b *broker) internalTCP(w http.ResponseWriter, r *http.Request) {
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+b.token)) != 1 {
+		http.Error(w, "unauthorized", 401)
+		return
+	}
+	id, deviceID, connectionID, ownerID := r.PathValue("id"), r.URL.Query().Get("device_id"), r.URL.Query().Get("connection_id"), r.URL.Query().Get("user_id")
+	if len(id) != 36 || len(deviceID) != 36 || len(connectionID) != 36 || len(ownerID) != 36 || r.Header.Get("Origin") != "" {
+		http.Error(w, "invalid stream", 400)
+		return
+	}
+	if b.call(r.Context(), "GET", "/api/internal/rdp-streams/"+id+"/authorize?device_id="+deviceID+"&connection_id="+connectionID+"&user_id="+ownerID, nil, nil) != nil {
+		http.Error(w, "session unauthorized", 403)
+		return
+	}
+	b.mu.Lock()
+	agent := b.active[deviceID]
+	allowed := agent != nil && b.connections[deviceID] == connectionID && b.rdpCapabilities[deviceID] && !b.updating[deviceID] && b.sessions[id] == nil
+	b.mu.Unlock()
+	if !allowed {
+		http.Error(w, "agent unavailable", 409)
+		return
+	}
+	conn, err := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	conn.SetReadLimit(maxMessage)
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	var open message
+	if conn.ReadJSON(&open) != nil || open.Version != 1 || open.Type != "tcp_open" || open.SessionID != id {
+		return
+	}
+	route := &sessionRoute{deviceID: deviceID, protocol: "rdp", ownerID: ownerID, agent: agent, frames: make(chan message, 16), closed: make(chan struct{})}
+	b.mu.Lock()
+	if b.active[deviceID] != agent || b.connections[deviceID] != connectionID || !b.rdpCapabilities[deviceID] || b.sessions[id] != nil || b.updating[deviceID] {
+		b.mu.Unlock()
+		return
+	}
+	b.sessions[id] = route
+	b.mu.Unlock()
+	defer func() {
+		b.closeRoute(id, route)
+		_ = b.write(agent, message{Version: 1, Type: "tcp_close", SessionID: id})
+	}()
+	if b.write(agent, message{Version: 1, Type: "tcp_open", SessionID: id}) != nil {
+		return
+	}
+	conn.SetReadDeadline(time.Time{})
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		for {
+			var msg message
+			if conn.ReadJSON(&msg) != nil {
+				return
+			}
+			if msg.Version != 1 || msg.SessionID != id || len(msg.Data) > 11000 || (msg.Type != "tcp_data" && msg.Type != "tcp_close") {
+				return
+			}
+			if b.write(agent, msg) != nil || msg.Type == "tcp_close" {
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-readDone:
+			return
+		case <-route.closed:
+			return
+		case msg := <-route.frames:
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if conn.WriteJSON(msg) != nil || msg.Type == "tcp_close" || msg.Type == "tcp_error" {
 				return
 			}
 		}
@@ -486,10 +572,13 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 	if json.Unmarshal(auth.Metadata, &authInfo) != nil {
 		return
 	}
-	updateCapable := false
+	updateCapable, rdpCapable := false, false
 	for _, capability := range authInfo.Capabilities {
 		if capability == "agent_update_v1" {
 			updateCapable = true
+		}
+		if capability == "rdp_tunnel_v1" {
+			rdpCapable = true
 		}
 	}
 	// Serialize registration with a revocation disconnect. The API locks the
@@ -512,8 +601,12 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 	if b.capabilities == nil {
 		b.capabilities = make(map[string]bool)
 	}
+	if b.rdpCapabilities == nil {
+		b.rdpCapabilities = make(map[string]bool)
+	}
 	b.connections[id] = connectionID
 	b.capabilities[id] = updateCapable
+	b.rdpCapabilities[id] = rdpCapable
 	delete(b.updating, id)
 	b.mu.Unlock()
 	if previous != nil {
@@ -527,6 +620,7 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 			delete(b.active, id)
 			delete(b.connections, id)
 			delete(b.capabilities, id)
+			delete(b.rdpCapabilities, id)
 			delete(b.updating, id)
 		}
 		for operation, owner := range b.updates {
@@ -693,6 +787,7 @@ func main() {
 	internalMux.HandleFunc("POST /internal/devices/{id}/disconnect", b.disconnect)
 	internalMux.HandleFunc("POST /internal/devices/{id}/agent-update", b.agentUpdate)
 	internalMux.HandleFunc("GET /internal/sessions/{id}", b.internalSession)
+	internalMux.HandleFunc("GET /internal/rdp-streams/{id}", b.internalTCP)
 	internalServer := &http.Server{Addr: ":8081", Handler: internalMux, ReadHeaderTimeout: 5 * time.Second}
 	server := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	shutdown, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
