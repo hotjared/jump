@@ -130,8 +130,14 @@ export default function SessionWorkspace({ sessions, activeId, select, close }: 
       className="session-view" key={session.id} hidden={activeId !== session.id}>
       <div className="session-heading"><div><strong>{session.name}</strong><span className="muted">{session.platform} · {session.protocol}</span>
         <span className={`session-state ${session.state}`}><i />{session.state}</span></div>
-        <div className="session-actions">{session.protocol === 'RDP' && <button className="button" onClick={e => e.currentTarget.closest('.session-view')?.requestFullscreen()}>Fullscreen</button>}
+        <div className="session-actions">{session.protocol === 'RDP' && <>
+          <button className="button" disabled={session.state !== 'connected'} onClick={() => void session.pasteLocalClipboardToRemote()}>Paste to Remote</button>
+          <button className="button" disabled={session.state !== 'connected' || !session.hasRemoteClipboard} onClick={() => void session.copyRemoteClipboardToLocal()}>Copy from Remote</button>
+          <button className="button" onClick={e => e.currentTarget.closest('.session-view')?.requestFullscreen()}>Fullscreen</button>
+        </>}
           <button className="button" onClick={() => closeTab(session.id)}>Disconnect</button></div></div>
+      {session.protocol === 'RDP' && session.clipboardStatus && <span className="muted" role="status">{session.clipboardStatus}</span>}
+      {session.protocol === 'RDP' && session.clipboardError && <p className="session-error" role="alert">{session.clipboardError}</p>}
       {session.error && <p className="session-error" role="alert">{session.error}</p>}
       {session.protocol === 'SSH' ? <SessionTerminal session={session} visible={activeId === session.id} /> : <SessionDesktop session={session} visible={activeId === session.id} />}
       <div className="session-footer">Jump agent · {session.protocol === 'SSH' ? 'SSH localhost:22' : 'RDP localhost:3389'}</div>

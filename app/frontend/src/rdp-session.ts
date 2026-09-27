@@ -1,10 +1,18 @@
 import Guacamole from 'guacamole-common-js'
 import type { SessionState } from './ssh-session'
 
+const MAX_CLIPBOARD_BYTES = 1024 * 1024
+const textMime = /^text\/plain(?:;\s*charset=utf-8)?$/i
+
 export class RdpSession {
   readonly protocol = 'RDP' as const
   state: SessionState = 'connecting'
   error = ''
+  clipboardError = ''
+  clipboardStatus = ''
+  hasRemoteClipboard = false
+  private remoteClipboard = ''
+  private statusTimer: ReturnType<typeof setTimeout> | null = null
   private listeners = new Set<() => void>()
   private client: any = null
 
@@ -23,6 +31,26 @@ export class RdpSession {
     tunnel.receiveTimeout = 45000
     const client = new Guacamole.Client(tunnel)
     this.client = client
+    client.onclipboard = (stream: any, mime: string) => {
+      if (!textMime.test(mime)) { client.sendAck(stream.index, 'Unsupported clipboard type', 0x0300); return }
+      const reader = new Guacamole.StringReader(stream)
+      let value = ''
+      let size = 0
+      let valid = true
+      reader.ontext = (chunk: string) => {
+        size += new TextEncoder().encode(chunk).length
+        if (size > MAX_CLIPBOARD_BYTES) valid = false
+        if (valid) value += chunk
+        client.sendAck(stream.index, valid ? 'OK' : 'Clipboard too large', valid ? 0 : 0x0300)
+      }
+      reader.onend = () => {
+        if (!valid || this.client !== client) return
+        this.remoteClipboard = value
+        this.hasRemoteClipboard = true
+        this.notify()
+      }
+      client.sendAck(stream.index, 'OK', 0)
+    }
     const display = client.getDisplay()
     node.appendChild(display.getElement())
     const mouse = new Guacamole.Mouse(display.getElement())
@@ -79,6 +107,9 @@ export class RdpSession {
     const unsubscribe = this.subscribe(resize)
     resize()
     return () => {
+      if (this.statusTimer) clearTimeout(this.statusTimer)
+      this.remoteClipboard = ''; this.hasRemoteClipboard = false
+      this.clipboardError = ''; this.clipboardStatus = ''
       observer.disconnect(); unsubscribe(); cancelAnimationFrame(frame)
       display.onresize = null
       keyboard.onkeydown = keyboard.onkeyup = null
@@ -91,5 +122,45 @@ export class RdpSession {
   disconnect() {
     this.client?.disconnect()
     this.state = 'disconnected'; this.notify()
+  }
+
+  private flash(status: string) {
+    if (this.statusTimer) clearTimeout(this.statusTimer)
+    this.clipboardError = ''
+    this.clipboardStatus = status
+    this.notify()
+    this.statusTimer = setTimeout(() => { this.clipboardStatus = ''; this.notify() }, 2000)
+  }
+
+  async pasteLocalClipboardToRemote() {
+    if (this.state !== 'connected' || !this.client) return
+    try {
+      const value = await navigator.clipboard.readText()
+      if (this.state !== 'connected' || !this.client) return
+      if (new TextEncoder().encode(value).length > MAX_CLIPBOARD_BYTES) {
+        this.clipboardError = 'Clipboard text exceeds the 1 MiB limit.'; this.notify(); return
+      }
+      const writer = new Guacamole.StringWriter(this.client.createClipboardStream('text/plain'))
+      writer.onack = (status: { code: number }) => {
+        if (status.code !== 0) { this.clipboardError = 'Remote clipboard transfer failed.'; this.clipboardStatus = ''; this.notify() }
+      }
+      writer.sendText(value)
+      writer.sendEnd()
+      this.flash('Sent')
+    } catch {
+      this.clipboardError = 'Could not read your clipboard. Allow clipboard access and try again.'
+      this.clipboardStatus = ''; this.notify()
+    }
+  }
+
+  async copyRemoteClipboardToLocal() {
+    if (this.state !== 'connected' || !this.hasRemoteClipboard) return
+    try {
+      await navigator.clipboard.writeText(this.remoteClipboard)
+      this.flash('Copied')
+    } catch {
+      this.clipboardError = 'Could not write to your clipboard. Allow clipboard access and try again.'
+      this.clipboardStatus = ''; this.notify()
+    }
   }
 }

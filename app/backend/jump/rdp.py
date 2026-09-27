@@ -2,9 +2,11 @@
 
 import asyncio
 import base64
+import binascii
 import codecs
 import json
 import logging
+import re
 from collections.abc import Callable
 
 from fastapi import WebSocket
@@ -15,6 +17,75 @@ from websockets.exceptions import ConnectionClosed
 from .config import settings
 
 logger = logging.getLogger(__name__)
+MAX_CLIPBOARD_BYTES = 1024 * 1024
+CLIPBOARD_CHUNK_BYTES = 8192
+TEXT_MIME = re.compile(r"text/plain(?:;\s*charset=utf-8)?", re.IGNORECASE)
+
+
+class ClipboardStreams:
+    """Validate only clipboard streams, separately for each protocol direction."""
+
+    def __init__(self) -> None:
+        self.local: dict[str, tuple[int, object]] = {}
+        self.remote: dict[str, tuple[int, object]] = {}
+        self.rejected_local: set[str] = set()
+        self.rejected_remote: set[str] = set()
+
+    def process(self, parts: list[str], from_browser: bool) -> tuple[bool, list[bytes]]:
+        """Return whether to forward and any sanitized replies to the sender."""
+        opcode = parts[0]
+        active = self.local if from_browser else self.remote
+        rejected = self.rejected_local if from_browser else self.rejected_remote
+        other = self.remote if from_browser else self.local
+        if opcode == "clipboard":
+            if (
+                len(parts) != 3
+                or not parts[1].isdigit()
+                or parts[1] in active
+                or parts[1] in rejected
+                or len(active) >= 16
+            ):
+                return False, []
+            stream_id, mime = parts[1:]
+            if not TEXT_MIME.fullmatch(mime):
+                return False, [instruction("ack", stream_id, "Unsupported clipboard type", "768")]
+            active[stream_id] = (0, codecs.getincrementaldecoder("utf-8")())
+            return True, []
+        if opcode == "ack":
+            return len(parts) == 4 and parts[1] in other, []
+        if opcode not in {"blob", "end"}:
+            return False, []
+        if len(parts) != (3 if opcode == "blob" else 2):
+            return False, []
+        stream_id = parts[1]
+        if stream_id in rejected:
+            if opcode == "end":
+                rejected.remove(stream_id)
+            return False, []
+        if stream_id not in active:
+            return False, []
+        size, decoder = active[stream_id]
+        if opcode == "end":
+            del active[stream_id]
+            try:
+                decoder.decode(b"", final=True)
+            except UnicodeDecodeError:
+                return False, [instruction("ack", stream_id, "Invalid clipboard text", "768")]
+            return True, []
+        try:
+            data = base64.b64decode(parts[2], validate=True)
+            if len(data) > CLIPBOARD_CHUNK_BYTES or size + len(data) > MAX_CLIPBOARD_BYTES:
+                raise ValueError("clipboard too large")
+            decoder.decode(data)
+        except (ValueError, UnicodeDecodeError, binascii.Error):
+            del active[stream_id]
+            if len(rejected) < 16:
+                rejected.add(stream_id)
+            return False, [
+                instruction("ack", stream_id, "Clipboard text is invalid or too large", "768")
+            ]
+        active[stream_id] = (size + len(data), decoder)
+        return True, []
 
 
 def guacd_error_class(parts: list[str]) -> str:
@@ -291,8 +362,8 @@ async def rdp_gateway(
             "resize-method": "display-update",
             "disable-audio": "true",
             "enable-drive": "false",
-            "disable-copy": "true",
-            "disable-paste": "true",
+            "disable-copy": "false",
+            "disable-paste": "false",
             "enable-printing": "false",
         }
         guacd_writer.write(instruction("size", str(width), str(height), str(dpi)))
@@ -333,6 +404,8 @@ async def rdp_gateway(
             logger.info("rdp browser ready send failed session=%s", session_id)
             return "browser_disconnected"
 
+        clipboard = ClipboardStreams()
+
         async def browser_to_guacd() -> str:
             while True:
                 try:
@@ -340,7 +413,7 @@ async def rdp_gateway(
                 except WebSocketDisconnect:
                     mark_close("browser_websocket_closed")
                     raise
-                if len(raw) > 1024:
+                if len(raw) > 12000:
                     return "browser_disconnected"
                 parts = parse_instruction(raw)
                 # Guacamole.WebSocketTunnel sends an internal stability ping as
@@ -352,7 +425,18 @@ async def rdp_gateway(
                         return "browser_disconnected"
                     await browser.send_text(raw)
                     continue
-                if parts[0] not in {"key", "mouse", "size", "sync", "ack", "nop", "disconnect"}:
+                if parts[0] in {"clipboard", "blob", "end", "ack"}:
+                    stream_id = parts[1] if len(parts) > 1 else ""
+                    was_local = stream_id in clipboard.local
+                    allowed, replies = clipboard.process(parts, from_browser=True)
+                    for reply in replies:
+                        await browser.send_text(reply.decode())
+                    if was_local and stream_id in clipboard.rejected_local:
+                        guacd_writer.write(instruction("end", stream_id))
+                        await guacd_writer.drain()
+                    if not allowed:
+                        continue
+                elif parts[0] not in {"key", "mouse", "size", "sync", "nop", "disconnect"}:
                     return "browser_disconnected"
                 guacd_writer.write(raw.encode())
                 await guacd_writer.drain()
@@ -386,8 +470,15 @@ async def rdp_gateway(
                             guacd_error_class(parts),
                         )
                         return guacd_failure(parts)
+                    if parts[0] in {"clipboard", "blob", "end", "ack"}:
+                        allowed, replies = clipboard.process(parts, from_browser=False)
+                        for reply in replies:
+                            guacd_writer.write(reply)
+                        if replies:
+                            await guacd_writer.drain()
+                        if not allowed:
+                            continue
                     if parts[0] in {
-                        "clipboard",
                         "file",
                         "pipe",
                         "filesystem",

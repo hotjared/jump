@@ -290,8 +290,8 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(
             assert "rdp request" not in caplog.text
             assert (
                 seen["enable-drive"] == "false"
-                and seen["disable-copy"] == "true"
-                and seen["disable-paste"] == "true"
+                and seen["disable-copy"] == "false"
+                and seen["disable-paste"] == "false"
                 and seen["disable-audio"] == "true"
                 and seen["enable-printing"] == "false"
             )
@@ -318,3 +318,46 @@ def test_guacd_error_categories_are_sanitized():
         == "authentication"
     )
     assert rdp.guacd_error_class(["error", "password=hidden", "519"]) == "other"
+
+
+def test_clipboard_streams_are_directional_and_text_only(caplog):
+    streams = rdp.ClipboardStreams()
+    secret = "private clipboard value"
+    blob = base64.b64encode(secret.encode()).decode()
+    with caplog.at_level(logging.INFO, logger="jump.rdp"):
+        assert streams.process(["blob", "1", blob], True) == (False, [])
+        assert streams.process(["end", "1"], False) == (False, [])
+        assert streams.process(["clipboard", "1", "image/png"], True)[0] is False
+        assert streams.process(["clipboard", "1", "text/plain;charset=utf-8"], True) == (True, [])
+        assert streams.process(["ack", "1", "OK", "0"], False) == (True, [])
+        assert streams.process(["blob", "1", blob], False) == (False, [])
+        assert streams.process(["blob", "1", blob], True) == (True, [])
+        assert streams.process(["end", "1"], True) == (True, [])
+        assert streams.local == {}
+        assert streams.process(["blob", "1", blob], True) == (False, [])
+        assert streams.process(["clipboard", "2", "text/plain"], False) == (True, [])
+        assert streams.process(["ack", "2", "OK", "0"], True) == (True, [])
+        assert streams.process(["blob", "2", blob], False) == (True, [])
+        assert streams.process(["end", "2"], False) == (True, [])
+        assert streams.remote == {}
+    assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("from_browser", [True, False])
+def test_clipboard_limit_and_invalid_payload_do_not_open_other_streams(from_browser):
+    streams = rdp.ClipboardStreams()
+    assert streams.process(["clipboard", "3", "text/plain"], from_browser) == (True, [])
+    chunk = base64.b64encode(b"a" * rdp.CLIPBOARD_CHUNK_BYTES).decode()
+    for _ in range(rdp.MAX_CLIPBOARD_BYTES // rdp.CLIPBOARD_CHUNK_BYTES):
+        assert streams.process(["blob", "3", chunk], from_browser) == (True, [])
+    allowed, reply = streams.process(["blob", "3", base64.b64encode(b"b").decode()], from_browser)
+    assert not allowed and rdp.parse_instruction(reply[0].decode())[0] == "ack"
+    assert streams.process(["blob", "3", chunk], from_browser) == (False, [])
+    assert streams.process(["end", "3"], from_browser) == (False, [])
+    assert not streams.local and not streams.remote
+    assert streams.process(["clipboard", "4", "text/html"], from_browser)[0] is False
+    assert streams.process(["file", "5", "text/plain", "name"], from_browser) == (False, [])
+    for opcode in ("pipe", "filesystem", "object", "body", "get", "put"):
+        assert streams.process([opcode, "5"], from_browser) == (False, [])
+    assert streams.process(["clipboard", "5", "text/plain"], from_browser) == (True, [])
+    assert streams.process(["blob", "5", "%%%"], from_browser)[0] is False
