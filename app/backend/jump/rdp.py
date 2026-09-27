@@ -299,6 +299,14 @@ async def rdp_gateway(
         guacd_writer.write(instruction("audio"))
         guacd_writer.write(instruction("video"))
         guacd_writer.write(instruction("image", "image/png", "image/jpeg"))
+        logger.info(
+            "rdp guacd connect parameters session=%s hostname=%s port=%s security=%s ignore_cert=%s",
+            session_id,
+            options["hostname"],
+            options["port"],
+            options["security"],
+            options["ignore-cert"],
+        )
         guacd_writer.write(
             instruction("connect", args[1], *(options.get(name, "") for name in args[2:]))
         )

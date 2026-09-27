@@ -17,21 +17,98 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
         async def guacd_server(reader, writer):
             _, selected = await rdp.read_instruction(reader)
             assert selected == ["select", "rdp"]
+            # Stock guacamole/guacd:1.6.0 RDP argument ordering, captured
+            # from the daemon's real args response in production.
             names = [
                 "VERSION_1_5_0",
                 "hostname",
                 "port",
+                "timeout",
+                "domain",
                 "username",
                 "password",
-                "domain",
-                "security",
-                "ignore-cert",
-                "enable-drive",
-                "disable-copy",
-                "disable-paste",
+                "width",
+                "height",
+                "dpi",
+                "initial-program",
+                "color-depth",
                 "disable-audio",
                 "enable-printing",
+                "printer-name",
+                "enable-drive",
+                "drive-name",
+                "drive-path",
+                "create-drive-path",
+                "disable-download",
+                "disable-upload",
+                "console",
+                "console-audio",
+                "server-layout",
+                "security",
+                "ignore-cert",
+                "cert-tofu",
+                "cert-fingerprints",
+                "disable-auth",
+                "remote-app",
+                "remote-app-dir",
+                "remote-app-args",
+                "static-channels",
+                "client-name",
+                "enable-wallpaper",
+                "enable-theming",
+                "enable-font-smoothing",
+                "enable-full-window-drag",
+                "enable-desktop-composition",
+                "enable-menu-animations",
+                "disable-bitmap-caching",
+                "disable-offscreen-caching",
+                "disable-glyph-caching",
+                "disable-gfx",
+                "preconnection-id",
+                "preconnection-blob",
+                "timezone",
+                "enable-sftp",
+                "sftp-hostname",
+                "sftp-host-key",
+                "sftp-port",
+                "sftp-timeout",
+                "sftp-username",
+                "sftp-password",
+                "sftp-private-key",
+                "sftp-passphrase",
+                "sftp-public-key",
+                "sftp-directory",
+                "sftp-root-directory",
+                "sftp-server-alive-interval",
+                "sftp-disable-download",
+                "sftp-disable-upload",
+                "recording-path",
+                "recording-name",
+                "recording-exclude-output",
+                "recording-exclude-mouse",
+                "recording-exclude-touch",
+                "recording-include-keys",
+                "create-recording-path",
+                "recording-write-existing",
                 "resize-method",
+                "enable-audio-input",
+                "enable-touch",
+                "read-only",
+                "gateway-hostname",
+                "gateway-port",
+                "gateway-domain",
+                "gateway-username",
+                "gateway-password",
+                "load-balance-info",
+                "disable-copy",
+                "disable-paste",
+                "wol-send-packet",
+                "wol-mac-addr",
+                "wol-broadcast-addr",
+                "wol-udp-port",
+                "wol-wait-time",
+                "force-lossless",
+                "normalize-clipboard",
             ]
             writer.write(rdp.instruction("args", *names))
             await writer.drain()
@@ -45,6 +122,11 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
             assert ["audio"] in handshake and ["video"] in handshake
             assert ["image", "image/png", "image/jpeg"] in handshake
             values = dict(zip(names, frame[1:], strict=True))
+            assert frame[1] == "VERSION_1_5_0"
+            assert frame[names.index("hostname") + 1] == values["hostname"]
+            assert frame[names.index("port") + 1] == values["port"]
+            assert frame[names.index("security") + 1] == "any"
+            assert frame[names.index("ignore-cert") + 1] == "true"
             seen.update(values)
             tunnel_reader, tunnel_writer = await asyncio.open_connection(
                 values["hostname"], int(values["port"])
@@ -184,6 +266,10 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
             assert "first_close=browser_disconnect" in caplog.text
             assert "rdp bridge connection accepted" in caplog.text
             assert "peer_ip=127.0.0.1 resolved_guacd_ips=['192.0.2.55']" in caplog.text
+            assert (
+                f"rdp guacd connect parameters session={sid} hostname=127.0.0.1 "
+                f"port={seen['port']} security=any ignore_cert=true"
+            ) in caplog.text
             assert "secret-password" not in caplog.text
             assert "rdp request" not in caplog.text
             assert (
