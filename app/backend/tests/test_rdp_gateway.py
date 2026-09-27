@@ -44,7 +44,10 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
             await tunnel_writer.drain()
             assert await tunnel_reader.readexactly(12) == b"rdp response"
             writer.write(rdp.instruction("ready", "opaque-id"))
+            writer.write(rdp.instruction("sync", "1"))
             await writer.drain()
+            _, received = await rdp.read_instruction(reader)
+            assert received == ["disconnect"]  # The internal ping never reaches guacd.
             await reader.read()
             tunnel_writer.close()
             writer.close()
@@ -93,11 +96,21 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
         class Browser:
             def __init__(self):
                 self.sent = []
+                self.ping_echoed = asyncio.Event()
+                self.synced = asyncio.Event()
 
             async def send_text(self, raw):
                 self.sent.append(raw)
+                parts = rdp.parse_instruction(raw)
+                if parts == ["", "ping", "12345"]:
+                    self.ping_echoed.set()
+                if parts == ["sync", "1"]:
+                    self.synced.set()
 
             async def receive_text(self):
+                if not self.ping_echoed.is_set():
+                    return rdp.instruction("", "ping", "12345").decode()
+                await self.synced.wait()
                 return rdp.instruction("disconnect").decode()
 
         browser = Browser()
@@ -123,6 +136,8 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
             )
             assert reason == "session_closed" and started == [True]
             assert rdp.parse_instruction(browser.sent[0])[0] == "ready"
+            assert ["", "ping", "12345"] in [rdp.parse_instruction(raw) for raw in browser.sent]
+            assert ["sync", "1"] in [rdp.parse_instruction(raw) for raw in browser.sent]
             assert seen["password"] == "secret-password" and seen["domain"] == "LAB"
             assert seen["security"] == "nla" and seen["ignore-cert"] == "true"
             assert (
