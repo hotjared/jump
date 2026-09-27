@@ -1432,6 +1432,9 @@ async def browser_rdp_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
         finish_remote_session(db, session, "session_expired")
         await ws.close(code=1008)
         return
+    if "guacamole" not in ws.scope.get("subprotocols", []):
+        await ws.close(code=1008)
+        return
     claim = db.execute(
         update(RemoteSession)
         .where(
@@ -1446,7 +1449,7 @@ async def browser_rdp_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
     if not claim.rowcount:
         await ws.close(code=1008)
         return
-    await ws.accept()
+    await ws.accept(subprotocol="guacamole")
     reason = "agent_disconnected"
     try:
         device = db.get(Device, session.device_id)

@@ -4,11 +4,17 @@ import json
 import logging
 import uuid
 
+import pytest
+from starlette.websockets import WebSocketDisconnect
+
 from jump import rdp
 from jump.main import cfg
 
 
-def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypatch, caplog):
+@pytest.mark.parametrize("ready_send_fails", [False, True])
+def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(
+    monkeypatch, caplog, ready_send_fails
+):
     caplog.set_level(logging.INFO, logger="jump.rdp")
 
     async def run():
@@ -151,8 +157,9 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
             writer.write(rdp.instruction("ready", "opaque-id"))
             writer.write(rdp.instruction("sync", "1"))
             await writer.drain()
-            _, received = await rdp.read_instruction(reader)
-            assert received == ["disconnect"]  # The internal ping never reaches guacd.
+            if not ready_send_fails:
+                _, received = await rdp.read_instruction(reader)
+                assert received == ["disconnect"]  # The internal ping never reaches guacd.
             await reader.read()
             tunnel_writer.close()
             writer.close()
@@ -219,6 +226,8 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
                 self.synced = asyncio.Event()
 
             async def send_text(self, raw):
+                if ready_send_fails and rdp.parse_instruction(raw)[0] == "ready":
+                    raise WebSocketDisconnect(code=1006)
                 self.sent.append(raw)
                 parts = rdp.parse_instruction(raw)
                 if parts == ["", "ping", "12345"]:
@@ -253,17 +262,24 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
                 ),
                 timeout=5,
             )
-            assert reason == "session_closed" and started == [True]
-            assert rdp.parse_instruction(browser.sent[0])[0] == "ready"
-            assert ["", "ping", "12345"] in [rdp.parse_instruction(raw) for raw in browser.sent]
-            assert ["sync", "1"] in [rdp.parse_instruction(raw) for raw in browser.sent]
+            assert reason == ("browser_disconnected" if ready_send_fails else "session_closed")
+            assert started == [True]
+            if ready_send_fails:
+                assert browser.sent == []
+                assert "first_close=browser_ready_send_failed" in caplog.text
+                assert f"rdp browser ready send failed session={sid}" in caplog.text
+            else:
+                assert rdp.parse_instruction(browser.sent[0])[0] == "ready"
+                assert ["", "ping", "12345"] in [rdp.parse_instruction(raw) for raw in browser.sent]
+                assert ["sync", "1"] in [rdp.parse_instruction(raw) for raw in browser.sent]
             assert seen["username"] == "Administrator"
             assert seen["password"] == "secret-password" and seen["domain"] == "LAB"
             assert seen["security"] == "any" and seen["ignore-cert"] == "true"
             assert seen["hostname"] == "127.0.0.1"
             assert seen["port"] != browser.query_params["port"]
             assert "guacd_to_agent_bytes=11 agent_to_guacd_bytes=12" in caplog.text
-            assert "first_close=browser_disconnect" in caplog.text
+            if not ready_send_fails:
+                assert "first_close=browser_disconnect" in caplog.text
             assert "rdp bridge connection accepted" in caplog.text
             assert "peer_ip=127.0.0.1 resolved_guacd_ips=['192.0.2.55']" in caplog.text
             assert (
