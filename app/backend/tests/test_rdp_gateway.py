@@ -1,13 +1,16 @@
 import asyncio
 import base64
 import json
+import logging
 import uuid
 
 from jump import rdp
 from jump.main import cfg
 
 
-def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypatch):
+def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="jump.rdp")
+
     async def run():
         seen = {}
 
@@ -147,6 +150,11 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
             assert seen["username"] == "Administrator"
             assert seen["password"] == "secret-password" and seen["domain"] == "LAB"
             assert seen["security"] == "any" and seen["ignore-cert"] == "true"
+            assert seen["hostname"] == "127.0.0.1"
+            assert "guacd_to_agent_bytes=11 agent_to_guacd_bytes=12" in caplog.text
+            assert "first_close=browser_disconnect" in caplog.text
+            assert "secret-password" not in caplog.text
+            assert "rdp request" not in caplog.text
             assert (
                 seen["enable-drive"] == "false"
                 and seen["disable-copy"] == "true"
@@ -159,3 +167,21 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
             await server.wait_closed()
 
     asyncio.run(run())
+
+
+def test_guacd_error_categories_are_sanitized():
+    assert (
+        rdp.guacd_error_class(["error", "Server refused connection (wrong security type?)", "519"])
+        == "transport"
+    )
+    assert (
+        rdp.guacd_error_class(
+            ["error", "SSL/TLS connection failed (untrusted/self-signed certificate?)", "519"]
+        )
+        == "tls"
+    )
+    assert (
+        rdp.guacd_error_class(["error", "Authentication failure (invalid credentials?)", "769"])
+        == "authentication"
+    )
+    assert rdp.guacd_error_class(["error", "password=hidden", "519"]) == "other"

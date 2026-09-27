@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -117,6 +119,29 @@ func TestPrivateRDPStreamBindingIsolationAndUpdateConflict(t *testing.T) {
 			t.Fatalf("stream isolation: %+v %v", echoed, err)
 		}
 	}
+	// Real WebSocket routing with binary payloads larger than a TCP read.
+	want := bytes.Repeat([]byte{0, 255, 1, 254, 13, 10, 42}, 37451)
+	var got []byte
+	for offset := 0; offset < len(want); {
+		end := min(offset+8192, len(want))
+		if err := first.WriteJSON(message{Version: 1, Type: "tcp_data", SessionID: ids[0],
+			Data: base64.StdEncoding.EncodeToString(want[offset:end])}); err != nil {
+			t.Fatal(err)
+		}
+		var echoed message
+		if err := first.ReadJSON(&echoed); err != nil || echoed.Type != "tcp_data" {
+			t.Fatalf("binary route: %v", err)
+		}
+		part, err := base64.StdEncoding.DecodeString(echoed.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, part...)
+		offset = end
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("broker changed binary stream: %d of %d bytes", len(got), len(want))
+	}
 	b.mu.Lock()
 	busy := len(b.sessions)
 	b.mu.Unlock()
@@ -136,4 +161,23 @@ func TestPrivateRDPStreamBindingIsolationAndUpdateConflict(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("stream disconnect leaked routes")
+}
+
+func TestRDPAgentQueueOverflowClosesTheStream(t *testing.T) {
+	id := "29bcac87-43b5-48cf-a4a1-ea46c49f2a82"
+	agent := &websocket.Conn{}
+	route := &sessionRoute{protocol: "rdp", agent: agent, frames: make(chan message, 1), closed: make(chan struct{})}
+	b := &broker{sessions: map[string]*sessionRoute{id: route}}
+	frame := message{Version: 1, Type: "tcp_data", SessionID: id, Data: "YQ=="}
+	if !b.agentFrame(agent, frame) || !b.agentFrame(agent, frame) {
+		t.Fatal("valid data frames should not kill agent presence")
+	}
+	select {
+	case <-route.closed:
+	default:
+		t.Fatal("overflow left the stream open after dropping a frame")
+	}
+	if reason := route.closeReason(); reason != "agent_to_broker_queue_overflow" {
+		t.Fatalf("overflow was not identified: %s", reason)
+	}
 }
