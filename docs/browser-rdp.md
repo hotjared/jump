@@ -14,4 +14,12 @@ Jump sets guacd's RDP security mode to `any`, allowing guacd/FreeRDP to negotiat
 
 guacd remains configured with `ignore-cert=true` because Windows hosts often use self-signed RDP certificates. **This skips verification of the Windows RDP server certificate when TLS is used.** Use a trusted server certificate and change this setting in code if certificate verification is required in your environment.
 
+## Diagnosing a transport failure
+
+Jump uses the stock `guacamole/guacd:1.6.0` image. The message `Server refused connection (wrong security type?)` maps to a general FreeRDP transport failure. It does not identify a hostname, TLS, credential, or tunnel fault on its own.
+
+For one failed session, match the session ID across the Jump and broker container logs. Jump reports the private listener, guacd attachment, the first bytes from guacd, cumulative bytes in both directions, and its first observed close. The broker reports the agent's `tcp_opened` acknowledgment, cumulative bytes accepted for delivery in each direction, frame rejection or queue overflow, and the first observed close. These counters are measured at their respective forwarding boundaries; they do not prove that Windows accepted every byte. Existing agents work unchanged, so there is no agent-side byte counter in this change. Guacd's log gives the FreeRDP error. No raw RDP traffic or credentials are included in these structured logs.
+
+The current tunnel has 16-frame buffers in the broker and agent, and `tcp_close` tears down the entire stream rather than modeling a TCP half-close. A queue overflow or premature close would appear in the new logs where Jump or the broker can observe it. The available Windows failure report does not establish either condition as its cause; compare one new attempt before changing the tunnel protocol or guacd.
+
 Clipboard copy and paste, file transfer, drive and printer redirection, audio, recording, unattended support links, VNC, and session resume are outside this phase. No RDP idle timer is enforced: Guacamole display traffic alone is not a reliable signal of user activity. Jump records the start, end or sanitized failure reason and periodically updates session activity metadata; it does not record screen contents or raw RDP bytes.

@@ -59,13 +59,27 @@ type message struct {
 }
 
 type sessionRoute struct {
-	deviceID string
-	protocol string
-	ownerID  string
-	agent    *websocket.Conn
-	frames   chan message
-	closed   chan struct{}
-	once     sync.Once
+	deviceID     string
+	protocol     string
+	ownerID      string
+	agent        *websocket.Conn
+	frames       chan message
+	closed       chan struct{}
+	once         sync.Once
+	firstClose   atomic.Pointer[string]
+	toAgentBytes atomic.Uint64
+	toJumpBytes  atomic.Uint64
+}
+
+func (r *sessionRoute) markClose(reason string) {
+	r.firstClose.CompareAndSwap(nil, &reason)
+}
+
+func (r *sessionRoute) closeReason() string {
+	if reason := r.firstClose.Load(); reason != nil {
+		return *reason
+	}
+	return "unknown"
 }
 
 type broker struct {
@@ -96,6 +110,7 @@ func (b *broker) write(conn *websocket.Conn, value message) error {
 
 func (b *broker) closeRoute(id string, route *sessionRoute) {
 	route.once.Do(func() {
+		route.markClose("route_cleanup")
 		b.mu.Lock()
 		if b.sessions[id] == route {
 			delete(b.sessions, id)
@@ -138,6 +153,9 @@ func (b *broker) agentFrame(conn *websocket.Conn, msg message) bool {
 	if len(msg.SessionID) != 36 || len(msg.Data) > 11000 ||
 		(msg.Type != "session_opened" && msg.Type != "session_error" && msg.Type != "session_data" && msg.Type != "session_close" &&
 			msg.Type != "tcp_opened" && msg.Type != "tcp_error" && msg.Type != "tcp_data" && msg.Type != "tcp_close") {
+		if strings.HasPrefix(msg.Type, "tcp_") {
+			slog.Warn("rdp agent frame rejected", "data_length", len(msg.Data))
+		}
 		return false
 	}
 	b.mu.Lock()
@@ -146,10 +164,23 @@ func (b *broker) agentFrame(conn *websocket.Conn, msg message) bool {
 	if route == nil || route.agent != conn || ((strings.HasPrefix(msg.Type, "tcp_")) != (route.protocol == "rdp")) {
 		return true // late frames cannot escape their closed session
 	}
+	if msg.Type == "tcp_data" {
+		data, err := base64.StdEncoding.DecodeString(msg.Data)
+		if err != nil || len(data) > 8192 {
+			route.markClose("agent_frame_rejected")
+			slog.Warn("rdp agent frame rejected", "session_id", msg.SessionID, "data_length", len(msg.Data))
+			b.closeRoute(msg.SessionID, route)
+			return true
+		}
+	}
 	select {
 	case route.frames <- msg:
 		return true
 	default:
+		if route.protocol == "rdp" {
+			route.markClose("agent_to_broker_queue_overflow")
+			slog.Warn("rdp broker queue overflow", "session_id", msg.SessionID, "direction", "agent_to_jump")
+		}
 		b.closeRoute(msg.SessionID, route)
 		return true // close only the slow session; keep presence and other streams alive
 	}
@@ -386,7 +417,10 @@ func (b *broker) internalTCP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		b.closeRoute(id, route)
 		_ = b.write(agent, message{Version: 1, Type: "tcp_close", SessionID: id})
+		slog.Info("rdp broker stream closed", "session_id", id, "first_close", route.closeReason(),
+			"jump_to_agent_bytes", route.toAgentBytes.Load(), "agent_to_jump_bytes", route.toJumpBytes.Load())
 	}()
+	slog.Info("rdp broker stream opened", "session_id", id, "device_id", deviceID)
 	if b.write(agent, message{Version: 1, Type: "tcp_open", SessionID: id}) != nil {
 		return
 	}
@@ -397,14 +431,33 @@ func (b *broker) internalTCP(w http.ResponseWriter, r *http.Request) {
 		for {
 			var msg message
 			if conn.ReadJSON(&msg) != nil {
+				route.markClose("jump_websocket_closed")
 				return
 			}
 			if msg.Version != 1 || msg.SessionID != id || len(msg.Data) > 11000 || (msg.Type != "tcp_data" && msg.Type != "tcp_close") {
+				route.markClose("jump_frame_rejected")
+				slog.Warn("rdp jump frame rejected", "session_id", id, "data_length", len(msg.Data))
 				return
 			}
-			if b.write(agent, msg) != nil || msg.Type == "tcp_close" {
+			var payloadBytes int
+			if msg.Type == "tcp_data" {
+				data, err := base64.StdEncoding.DecodeString(msg.Data)
+				if err != nil || len(data) > 8192 {
+					route.markClose("jump_frame_rejected")
+					slog.Warn("rdp jump frame rejected", "session_id", id, "data_length", len(msg.Data))
+					return
+				}
+				payloadBytes = len(data)
+			}
+			if b.write(agent, msg) != nil {
+				route.markClose("agent_websocket_write_failed")
 				return
 			}
+			if msg.Type == "tcp_close" {
+				route.markClose("jump_tcp_close")
+				return
+			}
+			route.toAgentBytes.Add(uint64(payloadBytes))
 		}
 	}()
 	for {
@@ -415,7 +468,20 @@ func (b *broker) internalTCP(w http.ResponseWriter, r *http.Request) {
 			return
 		case msg := <-route.frames:
 			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if conn.WriteJSON(msg) != nil || msg.Type == "tcp_close" || msg.Type == "tcp_error" {
+			if conn.WriteJSON(msg) != nil {
+				route.markClose("jump_websocket_write_failed")
+				return
+			}
+			if msg.Type == "tcp_opened" {
+				slog.Info("rdp agent TCP opened", "session_id", id)
+			}
+			if msg.Type == "tcp_data" {
+				if data, err := base64.StdEncoding.DecodeString(msg.Data); err == nil {
+					route.toJumpBytes.Add(uint64(len(data)))
+				}
+			}
+			if msg.Type == "tcp_close" || msg.Type == "tcp_error" {
+				route.markClose("agent_tcp_close")
 				return
 			}
 		}
