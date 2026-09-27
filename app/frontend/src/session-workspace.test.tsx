@@ -104,6 +104,18 @@ async function connectDevice(id: string) {
 
 describe('session workspace', () => {
 
+  it('lands on Devices, omits Sessions navigation, and retains the other pages', async () => {
+    render(<App />)
+    expect(await screen.findByRole('heading', { name: /Devices/ })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Dashboard' })).toBeNull()
+    const nav = screen.getByRole('navigation')
+    expect(within(nav).queryByRole('button', { name: /Sessions/ })).toBeNull()
+    for (const page of ['Dashboard', 'Support Links', 'Audit Log', 'Settings', 'Devices']) {
+      fireEvent.click(within(nav).getByRole('button', { name: new RegExp(`${page}$`) }))
+      expect(screen.getByRole('heading', { level: 1, name: new RegExp(page) })).toBeTruthy()
+    }
+  })
+
   it('opens the device Files UI from an active SSH session without recreating or disconnecting it', async () => {
     devices = [makeDevice('docker01', ['ssh', 'ssh_terminal_v1', 'file_transfer_v1'])]
     render(<App />)

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { agentFilename, downloadFor, enrollmentCommand, type AgentDownloads, type Platform } from './agent-downloads'
 import { canDeleteDevice, deletionConfirmed, deletionName, deviceDeleteMethod } from './device-actions'
 import AgentUpdatePanel, { type UpdateInfo } from './AgentUpdatePanel'
@@ -6,6 +6,7 @@ import { SshSession } from './ssh-session'
 import { RdpSession } from './rdp-session'
 import type { WorkspaceSession } from './SessionWorkspace'
 import QuickConnect, { type QuickPreference } from './QuickConnect'
+import Notice, { type NoticeMessage } from './Notice'
 const TerminalPanel = lazy(() => import('./TerminalPanel'))
 const RemotePanel = lazy(() => import('./RemotePanel'))
 const SessionWorkspace = lazy(() => import('./SessionWorkspace'))
@@ -22,8 +23,12 @@ type Device = {
 }
 type User = { id: string; email: string; display_name: string; role: string; csrf: string }
 type Event = { id: string; event_type: string; created_at: string; device_id: string | null }
-type Page = 'Dashboard' | 'Devices' | 'Sessions' | 'Support Links' | 'Audit Log' | 'Settings'
-const nav: Page[] = ['Dashboard', 'Devices', 'Sessions', 'Support Links', 'Audit Log', 'Settings']
+type Page = 'Dashboard' | 'Devices' | 'Support Links' | 'Audit Log' | 'Settings'
+const nav: { page: Page; icon: string }[] = [
+  { page: 'Dashboard', icon: '◫' }, { page: 'Devices', icon: '▤' },
+  { page: 'Support Links', icon: '↗' }, { page: 'Audit Log', icon: '≡' },
+  { page: 'Settings', icon: '⚙' },
+]
 const formatDate = (value: string | null) => value ? new Date(value).toLocaleString() : 'Never'
 
 async function get<T>(url: string): Promise<T> {
@@ -48,7 +53,8 @@ export default function App() {
   const [page, setPage] = useState<Page>('Devices')
   const [sessions, setSessions] = useState<WorkspaceSession[]>([])
   const [quickPreferences, setQuickPreferences] = useState<QuickPreference[]>([])
-  const [notice, setNotice] = useState('')
+  const [notice, setNotice] = useState<NoticeMessage | null>(null)
+  const dismissNotice = useCallback(() => setNotice(null), [])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [devices, setDevices] = useState<Device[]>([])
   const [groups, setGroups] = useState<Named[]>([])
@@ -157,8 +163,8 @@ export default function App() {
     <aside className="sidebar">
       <div className="brand"><span className="logo">J<span>↗</span></span><span>Jump</span></div>
       <div className="nav-label">WORKSPACE</div>
-      <nav>{nav.map((item, i) => <button key={item} className={page === item && !activeSessionId ? 'active' : ''} onClick={() => { setPage(item); setActiveSessionId(null); setSelected(null) }}>
-        <span className="nav-icon">{['◫', '▤', '▣', '↗', '≡', '⚙'][i]}</span>{item}
+      <nav>{nav.map(({ page: item, icon }) => <button key={item} className={page === item && !activeSessionId ? 'active' : ''} onClick={() => { setPage(item); setActiveSessionId(null); setSelected(null) }}>
+        <span className="nav-icon">{icon}</span>{item}
       </button>)}</nav>
       <div className="sidebar-bottom"><div className="avatar">{user.display_name[0]?.toUpperCase()}</div><div><strong>{user.display_name}</strong><small>{user.role}</small></div></div>
     </aside>
@@ -169,7 +175,7 @@ export default function App() {
         openFiles={id => { setSelected(id); setTab('Files') }} /></Suspense>
       <div className="content" hidden={Boolean(activeSessionId)}>
         {error && <div className="error" role="alert">{error}<button onClick={() => setError('')}>×</button></div>}
-        {notice && <div className="quick-notice" role="status">{notice}<button className="text-button" onClick={() => setNotice('')}>×</button></div>}
+        <Notice notice={notice} dismiss={dismissNotice} />
         {page === 'Dashboard' && <>
           <div className="heading"><div><p className="eyebrow">OVERVIEW</p><h1>Dashboard</h1><p>Device presence and recent activity at a glance.</p></div></div>
           <div className="stats"><div className="stat"><small>TOTAL DEVICES</small><strong>{devices.length}</strong></div><div className="stat"><small>ONLINE</small><strong className="green">{online}</strong></div><div className="stat"><small>OFFLINE</small><strong>{devices.length - online}</strong></div></div>
@@ -192,7 +198,7 @@ export default function App() {
               <span className="muted device-col-group">{d.group?.name || 'Ungrouped'} {d.tags.slice(0, 2).map(t => <em key={t.id}>{t.name}</em>)}</span><span className="muted device-col-last-seen">{formatDate(d.last_seen_at)}</span>
               <span className="quick-cell device-col-connect">{user.role === 'admin' && <QuickConnect device={d} preferences={quickPreferences.filter(p => p.device_id === d.id)}
                 mutate={mutate} onPreference={preference => setQuickPreferences(previous => [...previous.filter(p => p.device_id !== preference.device_id || p.protocol !== preference.protocol).map(p => p.device_id === preference.device_id ? { ...p, preferred: false } : p), preference])}
-                onConnected={session => { openSession(session, { activate: false }); setNotice(`${session.protocol} session started for ${session.name}`) }}
+                onConnected={session => { openSession(session, { activate: false }); setNotice({ text: `${session.protocol} session started for ${session.name}`, severity: 'success' }) }}
                 onError={setError} />}</span>
             </div>)}
             {!visible.length && <div className="empty">{devices.length ? 'No devices match these filters.' : 'No devices yet. Enroll your first Windows or Linux server.'}</div>}
@@ -206,7 +212,7 @@ export default function App() {
               {user.role === 'admin' && <form onSubmit={e => { e.preventDefault(); action(async () => { await mutate('/api/tags', 'POST', { name: newTag }); setNewTag(''); await refresh(true) }) }}><input aria-label="New tag" placeholder="Tag name" value={newTag} onChange={e => setNewTag(e.target.value)} required /><button className="button">Add</button></form>}</section></div>
           <button className="button signout" onClick={() => action(async () => { await mutate('/api/logout', 'POST'); location.reload() })}>Sign out</button>
         </>}
-        {(page === 'Sessions' || page === 'Support Links') && <><div className="heading"><div><p className="eyebrow">COMING LATER</p><h1>{page}</h1></div></div><div className="placeholder"><span>◇</span><h2>{page} is coming in a later phase</h2><p>Open a Linux device and select Terminal to start SSH.</p></div></>}
+        {page === 'Support Links' && <><div className="heading"><div><p className="eyebrow">COMING LATER</p><h1>{page}</h1></div></div><div className="placeholder"><span>◇</span><h2>{page} is coming in a later phase</h2><p>Open a Linux device and select Terminal to start SSH.</p></div></>}
       </div>
     </main>
     {device && <div className="overlay" onClick={() => setSelected(null)}><aside className="drawer" onClick={e => e.stopPropagation()}>
