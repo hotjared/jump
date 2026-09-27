@@ -66,7 +66,7 @@ services:
     networks: [internal]
 
   guacd:
-    image: guacamole/guacd:1.6.0
+    image: ${JUMP_GUACD_IMAGE:-ghcr.io/hotjared/jump-guacd:${JUMP_VERSION:-latest}}
     restart: unless-stopped
     networks: [internal]
 

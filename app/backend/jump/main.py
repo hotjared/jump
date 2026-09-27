@@ -1388,6 +1388,9 @@ async def browser_ssh_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
 RDP_ERRORS = {
     "rdp_unavailable": "RDP is unavailable on this device. Check that Windows Remote Desktop is listening locally.",
     "authentication_failed": "RDP authentication failed. Check the saved credential and NLA settings.",
+    "tls_failure": "RDP TLS negotiation failed. Check the Windows RDP service and certificate settings.",
+    "transport_failure": "The Windows RDP service closed the transport during connection setup.",
+    "security_negotiation_failed": "RDP security negotiation failed.",
     "guacd_unavailable": "RDP protocol service unavailable.",
     "session_timeout": "RDP connection timed out.",
     "agent_disconnected": "Jump agent disconnected.",
@@ -1503,6 +1506,7 @@ async def browser_rdp_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
                 credential.username,
                 credential.domain,
                 bytes(secret),
+                device.hostname,
                 started,
                 activity,
             )

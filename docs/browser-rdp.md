@@ -14,4 +14,12 @@ Jump sets guacd's RDP security mode to `any`, allowing guacd/FreeRDP to negotiat
 
 guacd remains configured with `ignore-cert=true` because Windows hosts often use self-signed RDP certificates. **This skips verification of the Windows RDP server certificate when TLS is used.** Use a trusted server certificate and change this setting in code if certificate verification is required in your environment.
 
+## Windows target identity and troubleshooting
+
+Jump's patched Guacamole 1.6.0 build uses FreeRDP 3's `UserSpecifiedServerName`: the TCP socket stays at the private one-use `jump:<ephemeral port>` bridge, while the RDP TLS/CredSSP server name comes from the selected device's agent-reported Windows hostname. The browser cannot set either the bridge endpoint or the target name. The agent currently reports the Windows computer name, so environments requiring an FQDN for Kerberos may still need a future trusted FQDN metadata source. The stock `guacamole/guacd:1.6.0` image does not advertise `server-name`; Jump rejects it instead of silently reconnecting with the bridge alias as the target identity.
+
+The former guacd error `Server refused connection (wrong security type?)` maps to FreeRDP's transport failure and does **not** by itself establish a hostname mismatch. Jump now logs the session ID at bridge open, guacd attachment, first RDP bytes (security negotiation begins), sanitized authentication/TLS/transport failure, and agent tunnel closure. Check both Jump and guacd logs for the same attempt. No password or RDP payload is logged. A successful real Windows login through this build is needed to confirm whether the identity mismatch was the observed failure.
+
+For a local build, run `sh scripts/build-guacd.sh` and set `JUMP_GUACD_IMAGE=jump-guacd:local` in Compose. Published releases use `ghcr.io/hotjared/jump-guacd` at the same `JUMP_VERSION` tag as Jump. This is a gateway change; the agent protocol and `127.0.0.1:3389` destination stay fixed, so no agent update is required.
+
 Clipboard copy and paste, file transfer, drive and printer redirection, audio, recording, unattended support links, VNC, and session resume are outside this phase. No RDP idle timer is enforced: Guacamole display traffic alone is not a reliable signal of user activity. Jump records the start, end or sanitized failure reason and periodically updates session activity metadata; it does not record screen contents or raw RDP bytes.

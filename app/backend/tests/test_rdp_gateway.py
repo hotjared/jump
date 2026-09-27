@@ -17,6 +17,7 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
             names = [
                 "VERSION_1_5_0",
                 "hostname",
+                "server-name",
                 "port",
                 "username",
                 "password",
@@ -135,6 +136,7 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
                     "Administrator",
                     "LAB",
                     b"secret-password",
+                    "WIN-SERVER.ad.example",
                     lambda: started.append(True),
                     lambda: None,
                 ),
@@ -145,6 +147,8 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
             assert ["", "ping", "12345"] in [rdp.parse_instruction(raw) for raw in browser.sent]
             assert ["sync", "1"] in [rdp.parse_instruction(raw) for raw in browser.sent]
             assert seen["username"] == "Administrator"
+            assert seen["hostname"] == "127.0.0.1"
+            assert seen["server-name"] == "WIN-SERVER.ad.example"
             assert seen["password"] == "secret-password" and seen["domain"] == "LAB"
             assert seen["security"] == "any" and seen["ignore-cert"] == "true"
             assert (
@@ -159,3 +163,27 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(monkeypat
             await server.wait_closed()
 
     asyncio.run(run())
+
+
+def test_rdp_target_name_validation_and_error_categories():
+    import pytest
+
+    for hostname in ("WIN-SERVER", "server.ad.example"):
+        assert rdp.target_server_name(hostname) == hostname
+    for hostname in ("", "jump/evil", "server:3389", "evil..host", "-bad", "bad-", "a" * 64):
+        with pytest.raises(ValueError, match="rdp_unavailable"):
+            rdp.target_server_name(hostname)
+    assert (
+        rdp.guacd_failure(["error", "Server refused connection (wrong security type?)", "519"])
+        == "transport_failure"
+    )
+    assert (
+        rdp.guacd_failure(
+            ["error", "SSL/TLS connection failed (untrusted/self-signed certificate?)", "519"]
+        )
+        == "tls_failure"
+    )
+    assert (
+        rdp.guacd_failure(["error", "Authentication failure (invalid credentials?)", "769"])
+        == "authentication_failed"
+    )

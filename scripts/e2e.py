@@ -66,6 +66,8 @@ def main():
         envfile = temp / "compose.env"
         envfile.write_text("".join(f"{key}={value}\n" for key, value in variables.items()))
         env = {**os.environ, **variables}
+        env["JUMP_GUACD_IMAGE"] = "jump-guacd:local"
+        run(["sh", "scripts/build-guacd.sh"], env=env, capture=False)
         compose = [
             "docker",
             "compose",
@@ -101,6 +103,7 @@ def main():
         services = production["services"]
         assert services["jump"]["image"] == "ghcr.io/hotjared/jump:latest"
         assert services["broker"]["image"] == "ghcr.io/hotjared/jump-broker:latest"
+        assert services["guacd"]["image"] == "jump-guacd:local"
         assert all("build" not in service for service in services.values())
         assert all("ports" not in services[name] for name in ("postgres", "guacd"))
         published = {
@@ -161,6 +164,7 @@ def main():
                 "s.sendall(b'6.select,3.rdp;');"
                 "reply=s.recv(512);"
                 "assert reply.startswith(b'4.args,'),reply[:40];"
+                "assert b'server-name' in reply,reply[:512];"
                 "s.close()"
             )
             wait_until(lambda: dc("exec", "-T", "jump", "python", "-c", guacd_check) is not None)

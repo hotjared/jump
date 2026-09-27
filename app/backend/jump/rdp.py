@@ -4,12 +4,30 @@ import asyncio
 import base64
 import codecs
 import json
+import logging
+import re
 from collections.abc import Callable
 
 from fastapi import WebSocket
 from websockets.asyncio.client import connect as ws_connect
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
+
+
+def target_server_name(hostname: str) -> str:
+    """Use only an agent-reported Windows hostname as the RDP identity."""
+    if (
+        not hostname
+        or len(hostname) > 253
+        or any(
+            not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+            for label in hostname.split(".")
+        )
+    ):
+        raise ValueError("rdp_unavailable")
+    return hostname
 
 
 def instruction(opcode: str, *args: str) -> bytes:
@@ -64,6 +82,15 @@ def split_instruction(buffer: str) -> tuple[str, list[str], str] | None:
 
 def guacd_failure(parts: list[str]) -> str:
     code = parts[2] if len(parts) > 2 else ""
+    message = parts[1] if len(parts) > 1 else ""
+    if message == "SSL/TLS connection failed (untrusted/self-signed certificate?)":
+        return "tls_failure"
+    if message == "Server refused connection (wrong security type?)":
+        return "transport_failure"
+    if message == "Security negotiation failed (wrong security type?)":
+        return "security_negotiation_failed"
+    if message == "Authentication failure (invalid credentials?)":
+        return "authentication_failed"
     if code in {"769", "771"}:
         return "authentication_failed"
     if code in {"514", "522", "776"}:
@@ -94,11 +121,13 @@ async def rdp_gateway(
     username: str,
     domain: str | None,
     password: bytes,
+    server_name: str,
     on_ready: Callable[[], None],
     on_activity: Callable[[], None],
 ) -> str:
     """Return a fixed reason code; never surface guacd's arbitrary error strings."""
     cfg = settings()
+    server_name = target_server_name(server_name)
     broker = None
     guacd_writer = None
     listener = None
@@ -119,6 +148,7 @@ async def rdp_gateway(
         await broker.send(json.dumps({"version": 1, "type": "tcp_open", "session_id": session_id}))
         first = json.loads(await asyncio.wait_for(broker.recv(), timeout=12))
         if first.get("session_id") != session_id or first.get("type") != "tcp_opened":
+            logger.info("rdp agent tunnel closure session=%s stage=tcp_open", session_id)
             return (
                 first.get("code")
                 if first.get("code") in {"rdp_unavailable", "unsupported_agent"}
@@ -144,13 +174,19 @@ async def rdp_gateway(
         # accepts one connection from the resolved guacd container address.
         listener = await asyncio.start_server(inbound, "0.0.0.0", 0)
         port = listener.sockets[0].getsockname()[1]
+        logger.info("rdp TCP bridge opened session=%s port=%s", session_id, port)
 
         async def bridge() -> None:
             reader, writer = await asyncio.wait_for(accepted, timeout=20)
             listener.close()
+            logger.info("rdp guacd connected to bridge session=%s", session_id)
 
             async def from_guacd() -> None:
+                started = False
                 while chunk := await reader.read(8192):
+                    if not started:
+                        logger.info("rdp security negotiation started session=%s", session_id)
+                        started = True
                     await broker.send(
                         json.dumps(
                             {
@@ -174,6 +210,7 @@ async def rdp_gateway(
                         writer.write(chunk)
                         await writer.drain()
                     elif frame.get("type") == "tcp_close":
+                        logger.info("rdp agent tunnel closure session=%s stage=stream", session_id)
                         raise RuntimeError("agent_disconnected")
                     else:
                         raise RuntimeError("agent_disconnected")
@@ -200,10 +237,14 @@ async def rdp_gateway(
         guacd_writer.write(instruction("select", "rdp"))
         await guacd_writer.drain()
         _, args = await read_instruction(guacd_reader)
-        if not args or args[0] != "args" or len(args) > 256:
+        if not args or args[0] != "args" or len(args) > 256 or "server-name" not in args[1:]:
+            logger.warning(
+                "rdp guacd unavailable or missing server-name support session=%s", session_id
+            )
             return "guacd_unavailable"
         options = {
             "hostname": cfg.rdp_bridge_host,
+            "server-name": server_name,
             "port": str(port),
             "username": username,
             "password": password.decode("utf-8"),
@@ -231,6 +272,12 @@ async def rdp_gateway(
         options["password"] = ""
         raw, first_guac = await read_instruction(guacd_reader)
         if first_guac[0] != "ready":
+            if first_guac[0] == "error":
+                logger.info(
+                    "rdp startup failure session=%s category=%s",
+                    session_id,
+                    guacd_failure(first_guac),
+                )
             return (
                 guacd_failure(first_guac) if first_guac[0] == "error" else "authentication_failed"
             )
@@ -277,6 +324,11 @@ async def rdp_gateway(
                 while parsed := split_instruction(pending):
                     raw, parts, pending = parsed
                     if parts[0] == "error":
+                        logger.info(
+                            "rdp session failure session=%s category=%s",
+                            session_id,
+                            guacd_failure(parts),
+                        )
                         return guacd_failure(parts)
                     if parts[0] in {
                         "clipboard",
@@ -304,6 +356,8 @@ async def rdp_gateway(
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         result = next(iter(done))
         reason = result.result() if result != bridge_task else "agent_disconnected"
+        if result == bridge_task:
+            logger.info("rdp bridge closed session=%s category=agent_disconnected", session_id)
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)

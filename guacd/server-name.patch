@@ -1,0 +1,76 @@
+diff --git a/src/protocols/rdp/settings.c b/src/protocols/rdp/settings.c
+index 4c10c15..d38b32c 100644
+--- a/src/protocols/rdp/settings.c
++++ b/src/protocols/rdp/settings.c
+@@ -21,6 +21,10 @@
+ #include "common/defaults.h"
+ #include "common/string.h"
+ #include "config.h"
++
++#ifndef HAVE_SETTERS_GETTERS
++#error "Jump RDP server-name support requires FreeRDP 3"
++#endif
+ #include "rdp.h"
+ #include "resolution.h"
+ #include "settings.h"
+@@ -55,6 +59,7 @@ const char fips_nla_mode_warning[] = (
+ /* Client plugin arguments */
+ const char* GUAC_RDP_CLIENT_ARGS[] = {
+     "hostname",
++    "server-name",
+     "port",
+     "timeout",
+     GUAC_RDP_ARGV_DOMAIN,
+@@ -161,6 +166,9 @@ enum RDP_ARGS_IDX {
+      */
+     IDX_HOSTNAME,
+ 
++    /* Name of the Windows target, independent of the bridge socket. */
++    IDX_SERVER_NAME,
++
+     /**
+      * The port to connect to. If omitted, the default RDP port of 3389 will be
+      * used.
+@@ -831,6 +839,10 @@ guac_rdp_settings* guac_rdp_parse_args(guac_user* user,
+         guac_user_parse_args_string(user, GUAC_RDP_CLIENT_ARGS, argv,
+                 IDX_HOSTNAME, "");
+ 
++    settings->server_name =
++        guac_user_parse_args_string(user, GUAC_RDP_CLIENT_ARGS, argv,
++                IDX_SERVER_NAME, "");
++
+     /* If port specified, use it, otherwise use an appropriate default */
+     settings->port =
+         guac_user_parse_args_int(user, GUAC_RDP_CLIENT_ARGS, argv, IDX_PORT,
+@@ -1371,6 +1383,7 @@ void guac_rdp_settings_free(guac_rdp_settings* settings) {
+     guac_mem_free(settings->drive_name);
+     guac_mem_free(settings->drive_path);
+     guac_mem_free(settings->hostname);
++    guac_mem_free(settings->server_name);
+     guac_mem_free(settings->certificate_fingerprints);
+     guac_mem_free(settings->initial_program);
+     guac_mem_free(settings->password);
+@@ -1513,6 +1526,9 @@ void guac_rdp_push_settings(guac_client* client,
+ 
+     /* Connection */
+     freerdp_settings_set_string(rdp_settings, FreeRDP_ServerHostname, guac_strdup(guac_settings->hostname));
++    if (guac_settings->server_name != NULL && *guac_settings->server_name)
++        freerdp_settings_set_string(rdp_settings, FreeRDP_UserSpecifiedServerName,
++                guac_strdup(guac_settings->server_name));
+     freerdp_settings_set_uint32(rdp_settings, FreeRDP_ServerPort, guac_settings->port);
+ 
+     /* Session */
+diff --git a/src/protocols/rdp/settings.h b/src/protocols/rdp/settings.h
+index 253b762..548c6c1 100644
+--- a/src/protocols/rdp/settings.h
++++ b/src/protocols/rdp/settings.h
+@@ -161,6 +161,9 @@ typedef struct guac_rdp_settings {
+      */
+     char* hostname;
+ 
++    /** CredSSP/TLS server identity; the TCP socket still uses hostname. */
++    char* server_name;
++
+     /**
+      * The port to connect to.
+      */

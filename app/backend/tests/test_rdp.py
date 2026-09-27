@@ -192,7 +192,21 @@ def test_attached_rdp_audits_start_and_end_without_secret(client, db, monkeypatc
     device = seed(db)
     as_user(client, db)
     cred = credential(client, device)
-    sid = create(client, device, cred).json()["id"]
+    response = client.post(
+        f"/api/devices/{device.id}/rdp-sessions",
+        headers=write_headers(),
+        json={
+            "credential_id": cred,
+            "width": 1280,
+            "height": 720,
+            "dpi": 96,
+            "hostname": "attacker.example",
+            "port": 9999,
+            "server_name": "attacker.example",
+        },
+    )
+    assert response.status_code == 201
+    sid = response.json()["id"]
 
     async def gateway(
         ws,
@@ -206,6 +220,7 @@ def test_attached_rdp_audits_start_and_end_without_secret(client, db, monkeypatc
         username,
         domain,
         password,
+        server_name,
         on_ready,
         on_activity,
     ):
@@ -219,6 +234,7 @@ def test_attached_rdp_audits_start_and_end_without_secret(client, db, monkeypatc
             "EXAMPLE",
             b"do-not-expose-me",
         )
+        assert server_name == device.hostname
         on_ready()
         on_activity()
         await ws.send_text(instruction("ready", "opaque-guacd-id").decode())
