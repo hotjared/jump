@@ -208,9 +208,10 @@ async def rdp_gateway(
             "username": username,
             "password": password.decode("utf-8"),
             "domain": domain or "",
-            "security": "nla",
-            # Windows commonly generates a self-signed RDP certificate. The
-            # transport remains TLS encrypted, but the certificate isn't verified.
+            "security": "any",
+            # Windows commonly generates a self-signed RDP certificate. When
+            # TLS is negotiated, encryption remains enabled but the server
+            # certificate is not verified.
             "ignore-cert": "true",
             "resize-method": "display-update",
             "disable-audio": "true",
