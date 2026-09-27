@@ -9,6 +9,7 @@ import tempfile
 import time
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -180,7 +181,7 @@ def main():
                 "online": False,
                 "last_seen": None,
                 "revoked": False,
-                "revision": "0005",
+                "revision": "0006",
             }
 
             script = (
@@ -237,6 +238,39 @@ def main():
                 "print(TimestampSigner(os.environ['SESSION_SECRET']).sign(state).decode())"
             )
             cookie = dc("exec", "-T", "jump", "python", "-c", cookie_script).strip()
+            file_dir = temp / "files"
+            file_dir.mkdir()
+            file_base = f"http://localhost:8000/api/devices/{device_id}/files"
+            browser_headers = {"Cookie": f"jump_session={cookie}"}
+            listing = Request(
+                f"{file_base}?{urlencode({'path': str(file_dir)})}", headers=browser_headers
+            )
+            with urlopen(listing, timeout=10) as response:
+                assert json.load(response)["entries"] == []
+            payload = b"Jump agent file round trip\n" * 2000
+            upload_query = urlencode(
+                {"path": str(file_dir), "filename": "round-trip.bin", "size": len(payload)}
+            )
+            upload = Request(
+                f"{file_base}/upload?{upload_query}",
+                data=payload,
+                method="POST",
+                headers={
+                    **browser_headers,
+                    "Origin": "http://localhost:8000",
+                    "X-CSRF-Token": "e2e-csrf",
+                    "Content-Type": "application/octet-stream",
+                },
+            )
+            with urlopen(upload, timeout=30) as response:
+                assert json.load(response)["state"] == "completed"
+            assert (file_dir / "round-trip.bin").read_bytes() == payload
+            download = Request(
+                f"{file_base}/download?{urlencode({'path': str(file_dir / 'round-trip.bin')})}",
+                headers=browser_headers,
+            )
+            with urlopen(download, timeout=30) as response:
+                assert response.read() == payload
             revoke_request = Request(
                 f"http://localhost:8000/api/devices/{device_id}/revoke",
                 data=b"",

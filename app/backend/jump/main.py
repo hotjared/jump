@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import binascii
+import hashlib
 import hmac
 import json
 import logging
@@ -23,7 +24,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -42,6 +43,7 @@ from .models import (
     Credential,
     Device,
     EnrollmentToken,
+    FileTransfer,
     Group,
     QuickConnectPreference,
     RemoteSession,
@@ -261,6 +263,494 @@ def serialize_device(device: Device, db: Session | None = None) -> dict:
         "last_seen_at": device.last_seen_at,
         "enrolled_at": device.enrolled_at,
     }
+
+
+FILE_CODES = {
+    "device_offline",
+    "unsupported_agent",
+    "path_not_found",
+    "permission_denied",
+    "not_a_directory",
+    "not_a_regular_file",
+    "destination_exists",
+    "invalid_path",
+    "transfer_cancelled",
+    "transfer_failed",
+}
+FILE_CHUNK = 32768
+
+
+def file_device(db: Session, device_id: uuid.UUID) -> Device:
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(404, "Device not found")
+    if (
+        not device.online
+        or not device.connection_id
+        or not device.agent_identity
+        or device.agent_identity.revoked_at
+    ):
+        raise HTTPException(409, "device_offline")
+    if "file_transfer_v1" not in device.capabilities:
+        raise HTTPException(409, "unsupported_agent")
+    return device
+
+
+def file_record(
+    db: Session,
+    user: User,
+    device: Device,
+    direction: str,
+    path: str,
+    filename: str = "",
+    size: int | None = None,
+) -> FileTransfer:
+    if len(path) > 4096 or len(filename) > 255 or size is not None and size < 0:
+        raise HTTPException(400, "invalid_path")
+    stale = db.scalars(
+        select(FileTransfer).where(
+            FileTransfer.device_id == device.id,
+            FileTransfer.state.in_(("pending", "active")),
+            FileTransfer.last_activity_at < now() - timedelta(minutes=2),
+        )
+    ).all()
+    for old in stale:
+        file_finish(db, old, "failed", "transfer_failed")
+    active = db.scalar(
+        select(func.count())
+        .select_from(FileTransfer)
+        .where(FileTransfer.device_id == device.id, FileTransfer.state.in_(("pending", "active")))
+    )
+    if active >= 4:
+        raise HTTPException(409, "transfer_failed")
+    transfer = FileTransfer(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        device_id=device.id,
+        connection_id=device.connection_id,
+        direction=direction,
+        remote_path=path,
+        filename=filename,
+        expected_size=size,
+        transferred_bytes=0,
+        state="pending",
+    )
+    db.add(transfer)
+    if direction in ("upload", "download"):
+        db.add(
+            AuditEvent(
+                event_type=f"file_{direction}_started",
+                actor_user_id=user.id,
+                device_id=device.id,
+                detail={
+                    "transfer_id": str(transfer.id),
+                    "filename": filename,
+                    "remote_path": path,
+                    "size": size,
+                },
+            )
+        )
+    db.commit()
+    return transfer
+
+
+def file_output(transfer: FileTransfer) -> dict:
+    return {
+        key: getattr(transfer, key)
+        for key in (
+            "id",
+            "device_id",
+            "direction",
+            "filename",
+            "remote_path",
+            "expected_size",
+            "transferred_bytes",
+            "state",
+            "sha256",
+            "failure_reason",
+            "created_at",
+            "completed_at",
+        )
+    }
+
+
+def file_finish(
+    db: Session,
+    transfer: FileTransfer,
+    state: str,
+    reason: str | None = None,
+    digest: str | None = None,
+) -> None:
+    db.refresh(transfer)
+    if transfer.state in ("completed", "failed", "cancelled"):
+        return
+    transfer.state = state
+    transfer.failure_reason = (
+        reason if reason in FILE_CODES else "transfer_failed" if reason else None
+    )
+    transfer.sha256 = digest if state == "completed" else None
+    transfer.completed_at = now()
+    if transfer.direction in ("upload", "download"):
+        db.add(
+            AuditEvent(
+                event_type=f"file_{transfer.direction}_{state}",
+                actor_user_id=transfer.user_id,
+                device_id=transfer.device_id,
+                detail={
+                    "transfer_id": str(transfer.id),
+                    "filename": transfer.filename,
+                    "remote_path": transfer.remote_path,
+                    "size": transfer.transferred_bytes,
+                    "reason": transfer.failure_reason,
+                },
+            )
+        )
+    db.commit()
+
+
+def file_progress(db: Session, transfer: FileTransfer, count: int, force: bool = False) -> None:
+    if (
+        not force
+        and count - transfer.transferred_bytes < 262144
+        and now() - transfer.last_activity_at.replace(tzinfo=UTC) < timedelta(seconds=5)
+    ):
+        return
+    db.refresh(transfer)
+    if transfer.state not in ("pending", "active"):
+        raise RuntimeError("transfer_cancelled")
+    transfer.transferred_bytes = count
+    transfer.last_activity_at = now()
+    transfer.state = "active"
+    db.commit()
+
+
+def file_failure(frame: dict) -> str:
+    code = frame.get("code", "transfer_failed")
+    return code if code in FILE_CODES else "transfer_failed"
+
+
+def file_download_name(path: str, os_family: str) -> str:
+    separator = "\\" if os_family == "windows" else "/"
+    return path.rstrip(separator).rsplit(separator, 1)[-1]
+
+
+async def file_socket(transfer: FileTransfer):
+    address = (
+        cfg.broker_internal_url.rstrip("/")
+        .replace("http://", "ws://", 1)
+        .replace("https://", "wss://", 1)
+    )
+    return await ws_connect(
+        f"{address}/internal/file-streams/{transfer.id}?device_id={transfer.device_id}"
+        f"&connection_id={transfer.connection_id}&user_id={transfer.user_id}",
+        additional_headers={"Authorization": "Bearer " + cfg.broker_internal_token},
+        max_size=65536,
+        open_timeout=10,
+        close_timeout=2,
+    )
+
+
+async def file_receive(socket, transfer: FileTransfer) -> dict:
+    frame = json.loads(await asyncio.wait_for(socket.recv(), timeout=30))
+    if frame.get("version") != 1 or frame.get("transfer_id") != str(transfer.id):
+        raise RuntimeError("transfer_failed")
+    if frame.get("type") == "file_error":
+        raise RuntimeError(file_failure(frame))
+    return frame
+
+
+@app.get("/api/internal/file-transfers/{transfer_id}/authorize", dependencies=[Depends(internal)])
+def authorize_file_transfer(
+    transfer_id: uuid.UUID,
+    device_id: uuid.UUID,
+    connection_id: str,
+    user_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    transfer = db.get(FileTransfer, transfer_id)
+    device = db.get(Device, device_id)
+    if (
+        not transfer
+        or not device
+        or transfer.device_id != device_id
+        or transfer.user_id != user_id
+        or transfer.connection_id != connection_id
+        or device.connection_id != connection_id
+        or transfer.state != "pending"
+        or not device.online
+        or not device.agent_identity
+        or device.agent_identity.revoked_at
+        or "file_transfer_v1" not in device.capabilities
+    ):
+        raise HTTPException(403, "Unauthorized transfer")
+    return {"authorized": True}
+
+
+@app.get("/api/devices/{device_id}/files")
+async def list_files(
+    device_id: uuid.UUID,
+    path: str = "",
+    offset: int = 0,
+    user: User = Depends(admin),
+    db: Session = Depends(get_db),
+):
+    if offset < 0 or offset > 10000:
+        raise HTTPException(400, "invalid_path")
+    device = file_device(db, device_id)
+    transfer = file_record(db, user, device, "list", path)
+    socket = None
+    try:
+        socket = await file_socket(transfer)
+        await socket.send(
+            json.dumps(
+                {
+                    "version": 1,
+                    "type": "file_list",
+                    "transfer_id": str(transfer.id),
+                    "path": path,
+                    "offset": offset,
+                }
+            )
+        )
+        frame = await file_receive(socket, transfer)
+        if frame.get("type") != "file_list_result" or not isinstance(frame.get("entries"), list):
+            raise RuntimeError("transfer_failed")
+        return {
+            "path": frame.get("path", path),
+            "entries": frame["entries"],
+            "more": frame.get("more", False),
+        }
+    except Exception as exc:
+        code = str(exc) if str(exc) in FILE_CODES else "transfer_failed"
+        raise HTTPException(409, code) from None
+    finally:
+        try:
+            if socket:
+                await socket.close()
+        finally:
+            db.delete(transfer)
+            db.commit()
+
+
+@app.get("/api/devices/{device_id}/file-transfers")
+def list_file_transfers(
+    device_id: uuid.UUID, user: User = Depends(admin), db: Session = Depends(get_db)
+):
+    file_device(db, device_id)
+    transfers = db.scalars(
+        select(FileTransfer)
+        .where(
+            FileTransfer.device_id == device_id,
+            FileTransfer.user_id == user.id,
+            FileTransfer.direction.in_(("upload", "download")),
+        )
+        .order_by(FileTransfer.created_at.desc())
+        .limit(20)
+    ).all()
+    for transfer in transfers:
+        if transfer.state in ("pending", "active") and now() - transfer.last_activity_at.replace(
+            tzinfo=UTC
+        ) > timedelta(minutes=2):
+            file_finish(db, transfer, "failed", "transfer_failed")
+    return [file_output(transfer) for transfer in transfers]
+
+
+@app.post("/api/devices/{device_id}/files/upload")
+async def upload_file(
+    device_id: uuid.UUID,
+    request: Request,
+    path: str,
+    filename: str,
+    size: int,
+    overwrite: bool = False,
+    user: User = Depends(admin),
+    db: Session = Depends(get_db),
+):
+    if request.headers.get("content-type", "").split(";")[0] != "application/octet-stream":
+        raise HTTPException(415, "Expected a raw file stream")
+    device = file_device(db, device_id)
+    transfer = file_record(db, user, device, "upload", path, filename, size)
+    digest = hashlib.sha256()
+    count = 0
+    socket = None
+    try:
+        socket = await file_socket(transfer)
+        await socket.send(
+            json.dumps(
+                {
+                    "version": 1,
+                    "type": "file_upload_open",
+                    "transfer_id": str(transfer.id),
+                    "path": path,
+                    "name": filename,
+                    "size": size,
+                    "overwrite": overwrite,
+                }
+            )
+        )
+        opened = await file_receive(socket, transfer)
+        if opened.get("type") != "file_opened":
+            raise RuntimeError("transfer_failed")
+        file_progress(db, transfer, 0, force=True)
+        async for block in request.stream():
+            for start in range(0, len(block), FILE_CHUNK):
+                chunk = block[start : start + FILE_CHUNK]
+                if count + len(chunk) > size:
+                    raise RuntimeError("transfer_failed")
+                await socket.send(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "type": "file_chunk",
+                            "transfer_id": str(transfer.id),
+                            "data": base64.b64encode(chunk).decode("ascii"),
+                        }
+                    )
+                )
+                ack = await file_receive(socket, transfer)
+                if ack.get("type") != "file_opened" or ack.get("size") != count + len(chunk):
+                    raise RuntimeError("transfer_failed")
+                digest.update(chunk)
+                count += len(chunk)
+                file_progress(db, transfer, count)
+        if count != size:
+            raise RuntimeError("transfer_failed")
+        await socket.send(
+            json.dumps({"version": 1, "type": "file_finish", "transfer_id": str(transfer.id)})
+        )
+        result = await file_receive(socket, transfer)
+        if (
+            result.get("type") != "file_finished"
+            or result.get("size") != count
+            or result.get("sha256") != digest.hexdigest()
+        ):
+            raise RuntimeError("transfer_failed")
+        file_progress(db, transfer, count, force=True)
+        file_finish(db, transfer, "completed", digest=digest.hexdigest())
+        return file_output(transfer)
+    except Exception as exc:
+        code = str(exc) if str(exc) in FILE_CODES else "transfer_failed"
+        file_finish(db, transfer, "failed", code)
+        raise HTTPException(409, code) from None
+    finally:
+        if socket:
+            await socket.close()
+
+
+@app.get("/api/devices/{device_id}/files/download")
+async def download_file(
+    device_id: uuid.UUID, path: str, user: User = Depends(admin), db: Session = Depends(get_db)
+):
+    device = file_device(db, device_id)
+    filename = file_download_name(path, device.os_family)
+    if not filename or filename in (".", "..") or any(c in filename for c in "\r\n\x00"):
+        raise HTTPException(400, "invalid_path")
+    transfer = file_record(db, user, device, "download", path, filename)
+    socket = None
+    try:
+        socket = await file_socket(transfer)
+        await socket.send(
+            json.dumps(
+                {
+                    "version": 1,
+                    "type": "file_download_open",
+                    "transfer_id": str(transfer.id),
+                    "path": path,
+                }
+            )
+        )
+        opened = await file_receive(socket, transfer)
+        if (
+            opened.get("type") != "file_opened"
+            or not isinstance(opened.get("size"), int)
+            or opened["size"] < 0
+        ):
+            raise RuntimeError("transfer_failed")
+        file_progress(db, transfer, 0, force=True)
+        transfer.expected_size = opened["size"]
+        db.commit()
+    except Exception as exc:
+        if socket:
+            await socket.close()
+        code = str(exc) if str(exc) in FILE_CODES else "transfer_failed"
+        file_finish(db, transfer, "failed", code)
+        raise HTTPException(409, code) from None
+
+    async def stream():
+        digest = hashlib.sha256()
+        count = 0
+        try:
+            while True:
+                frame = await file_receive(socket, transfer)
+                if frame.get("type") == "file_finished":
+                    if (
+                        frame.get("size") != count
+                        or frame.get("sha256") != digest.hexdigest()
+                        or count != transfer.expected_size
+                    ):
+                        raise RuntimeError("transfer_failed")
+                    file_progress(db, transfer, count, force=True)
+                    file_finish(db, transfer, "completed", digest=digest.hexdigest())
+                    return
+                if frame.get("type") != "file_chunk":
+                    raise RuntimeError("transfer_failed")
+                data = base64.b64decode(frame.get("data", ""), validate=True)
+                if not data or len(data) > FILE_CHUNK or count + len(data) > transfer.expected_size:
+                    raise RuntimeError("transfer_failed")
+                digest.update(data)
+                count += len(data)
+                file_progress(db, transfer, count)
+                yield data
+                await socket.send(
+                    json.dumps({"version": 1, "type": "file_ack", "transfer_id": str(transfer.id)})
+                )
+        except (
+            RuntimeError,
+            OSError,
+            ConnectionClosed,
+            TimeoutError,
+            asyncio.CancelledError,
+            ValueError,
+            binascii.Error,
+        ):
+            file_finish(db, transfer, "failed", "transfer_failed")
+            raise
+        finally:
+            await socket.close()
+
+    # RFC 5987 encoding and a fixed ASCII fallback prevent response header injection.
+    from urllib.parse import quote
+
+    return StreamingResponse(
+        stream(),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename=download; filename*=UTF-8''{quote(filename, safe='')}",
+            "Content-Length": str(transfer.expected_size),
+            "X-Transfer-ID": str(transfer.id),
+        },
+    )
+
+
+@app.post("/api/file-transfers/{transfer_id}/cancel")
+async def cancel_file_transfer(
+    transfer_id: uuid.UUID, user: User = Depends(admin), db: Session = Depends(get_db)
+):
+    transfer = db.get(FileTransfer, transfer_id)
+    if not transfer or transfer.user_id != user.id:
+        raise HTTPException(404, "Transfer not found")
+    if transfer.state in ("pending", "active"):
+        file_finish(db, transfer, "cancelled", "transfer_cancelled")
+        async with httpx.AsyncClient(timeout=5) as client:
+            try:
+                await client.post(
+                    f"{cfg.broker_internal_url.rstrip('/')}/internal/file-streams/{transfer.id}/cancel",
+                    headers={"Authorization": "Bearer " + cfg.broker_internal_token},
+                    json={"device_id": str(transfer.device_id), "user_id": str(user.id)},
+                )
+            except httpx.HTTPError:
+                pass  # The transfer route's disconnect cleanup also cancels agent I/O.
+    return file_output(transfer)
 
 
 @app.get("/health")

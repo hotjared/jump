@@ -1,0 +1,168 @@
+// @vitest-environment jsdom
+import { afterEach, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import FilesPanel, { childPath, parentPath } from './FilesPanel'
+
+afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+const device = { id: 'device-1', os_family: 'linux', online: true, identity_state: 'active', capabilities: ['file_transfer_v1'] }
+
+it('navigates directories and offers explicit file download', async () => {
+  const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => url.includes('path=%2Ffolder')
+    ? { entries: [{ name: 'data.txt', type: 'file', size: 12, modified_at: '' }], more: false }
+    : url.includes('/file-transfers') ? [] : { entries: [{ name: 'folder', type: 'directory', size: 0, modified_at: '' }], more: false } }))
+  vi.stubGlobal('fetch', fetch)
+  render(<FilesPanel device={device} csrf="token" />)
+  fireEvent.click(await screen.findByRole('button', { name: /folder/i }))
+  await screen.findByRole('button', { name: /data.txt/i })
+  expect(screen.queryByRole('link', { name: 'Download' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: /data.txt/i }))
+  expect(screen.getByRole('link', { name: 'Download' }).getAttribute('href')).toContain('path=%2Ffolder%2Fdata.txt')
+  fireEvent.click(screen.getByRole('button', { name: /Parent/i }))
+  await waitFor(() => expect(screen.getByRole('button', { name: /folder/i })).toBeTruthy())
+})
+
+it('shows the older agent state without requesting files', () => {
+  const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+  render(<FilesPanel device={{ ...device, capabilities: [] }} csrf="token" />)
+  expect(screen.getByText('Update the Jump agent to enable file transfer.')).toBeTruthy()
+  expect(fetch).not.toHaveBeenCalled()
+})
+
+it('handles Windows drive and Linux root parent paths', () => {
+  expect(childPath('', 'C:\\', true)).toBe('C:\\')
+  expect(childPath('C:\\', 'Users', true)).toBe('C:\\Users')
+  expect(parentPath('C:\\Users', true)).toBe('C:\\')
+  expect(parentPath('C:\\', true)).toBe('')
+  expect(parentPath('/var/log', false)).toBe('/var')
+  expect(parentPath('/', false)).toBe('/')
+})
+
+it('shows Windows fixed drives in This PC and opens a selected drive', async () => {
+  const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => url.includes('path=C%3A%5C')
+    ? { entries: [{ name: 'Users', type: 'directory', size: 0, modified_at: '' }], more: false }
+    : url.includes('/file-transfers') ? [] : { entries: [{ name: 'C:\\', type: 'directory', size: 0, modified_at: '' }], more: false } }))
+  vi.stubGlobal('fetch', fetch)
+  render(<FilesPanel device={{ ...device, os_family: 'windows' }} csrf="token" />)
+  expect(screen.getByText('This PC')).toBeTruthy()
+  fireEvent.click(await screen.findByRole('button', { name: /C:/i }))
+  await screen.findByRole('button', { name: /Users/i })
+  expect(fetch).toHaveBeenCalledWith(expect.stringContaining('path=C%3A%5C'), expect.anything())
+})
+
+class FakeXHR {
+  static instances: FakeXHR[] = []
+  upload: { onprogress: ((event: ProgressEvent) => void) | null } = { onprogress: null }
+  onload: (() => void) | null = null
+  onerror: (() => void) | null = null
+  onabort: (() => void) | null = null
+  url = ''
+  body: File | null = null
+  headers: Record<string, string> = {}
+  withCredentials = false
+  status = 200
+  constructor() { FakeXHR.instances.push(this) }
+  open(method: string, url: string) { expect(method).toBe('POST'); this.url = url }
+  setRequestHeader(name: string, value: string) { this.headers[name] = value }
+  send(file: File) { this.body = file }
+  abort() { this.onabort?.() }
+}
+
+function fileFetch(existing = false, transfers: object[] = []) {
+  return vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith('/file-transfers') ? transfers : {
+    entries: existing ? [{ name: 'report:2026.txt', type: 'file', size: 4, modified_at: '' }] : [], more: false,
+  } }))
+}
+
+it('uploads the selected file with path, name, size, CSRF, and no implicit overwrite; shows progress', async () => {
+  FakeXHR.instances = []
+  vi.stubGlobal('fetch', fileFetch())
+  vi.stubGlobal('XMLHttpRequest', FakeXHR)
+  render(<FilesPanel device={device} csrf="token" />)
+  await screen.findByText('This directory is empty.')
+  const file = new File(['payload'], 'report:2026.txt')
+  fireEvent.change(screen.getByLabelText('Choose file to upload'), { target: { files: [file] } })
+  const request = FakeXHR.instances[0]
+  expect(request.body).toBe(file)
+  expect(new URL(request.url, location.origin).searchParams).toEqual(new URLSearchParams({ path: '/', filename: file.name, size: '7', overwrite: 'false' }))
+  expect(request.headers).toMatchObject({ 'Content-Type': 'application/octet-stream', 'X-CSRF-Token': 'token' })
+  expect(request.withCredentials).toBe(true)
+  expect(screen.getByRole('status').textContent).toContain('0%')
+  request.upload.onprogress?.({ lengthComputable: true, loaded: 3, total: 4 } as ProgressEvent)
+  await screen.findByText('Sending upload: 75%')
+})
+
+it('requires confirmation before overwriting and sends the explicit overwrite flag', async () => {
+  FakeXHR.instances = []
+  vi.stubGlobal('fetch', fileFetch(true))
+  vi.stubGlobal('XMLHttpRequest', FakeXHR)
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true)
+  render(<FilesPanel device={device} csrf="token" />)
+  await screen.findByRole('button', { name: /report:2026.txt/ })
+  const picker = screen.getByLabelText('Choose file to upload')
+  const file = new File(['data'], 'report:2026.txt')
+  fireEvent.change(picker, { target: { files: [file] } })
+  expect(confirm).toHaveBeenCalledWith('Overwrite report:2026.txt on this device?')
+  expect(FakeXHR.instances).toHaveLength(0)
+  fireEvent.change(picker, { target: { files: [file] } })
+  expect(new URL(FakeXHR.instances[0].url, location.origin).searchParams.get('overwrite')).toBe('true')
+})
+
+it('treats Linux filenames as case-sensitive for overwrite detection', async () => {
+  FakeXHR.instances = []
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith('/file-transfers') ? [] : {
+    entries: [{ name: 'Report.txt', type: 'file', size: 4, modified_at: '' }], more: false,
+  } })))
+  vi.stubGlobal('XMLHttpRequest', FakeXHR)
+  const confirm = vi.spyOn(window, 'confirm')
+  render(<FilesPanel device={device} csrf="token" />)
+  await screen.findByRole('button', { name: /Report.txt/ })
+  const file = new File(['data'], 'report.txt')
+  fireEvent.change(screen.getByLabelText('Choose file to upload'), { target: { files: [file] } })
+  expect(confirm).not.toHaveBeenCalled()
+  expect(FakeXHR.instances).toHaveLength(1)
+  expect(new URL(FakeXHR.instances[0].url, location.origin).searchParams.get('overwrite')).toBe('false')
+  confirm.mockRestore()
+})
+
+it('treats Windows filenames as case-insensitive for overwrite detection', async () => {
+  FakeXHR.instances = []
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ ok: true, json: async () => {
+    if (url.endsWith('/file-transfers')) return []
+    if (url.includes('path=C%3A%5C')) return {
+      entries: [{ name: 'Report.txt', type: 'file', size: 4, modified_at: '' }], more: false,
+    }
+    return { entries: [{ name: 'C:\\', type: 'directory', size: 0, modified_at: '' }], more: false }
+  } })))
+  vi.stubGlobal('XMLHttpRequest', FakeXHR)
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+  render(<FilesPanel device={{ ...device, os_family: 'windows' }} csrf="token" />)
+  fireEvent.click(await screen.findByRole('button', { name: /C:/i }))
+  await screen.findByRole('button', { name: /Report.txt/ })
+  const file = new File(['data'], 'report.txt')
+  fireEvent.change(screen.getByLabelText('Choose file to upload'), { target: { files: [file] } })
+  expect(confirm).toHaveBeenCalledWith('Overwrite report.txt on this device?')
+  expect(FakeXHR.instances).toHaveLength(1)
+  expect(new URL(FakeXHR.instances[0].url, location.origin).searchParams.get('overwrite')).toBe('true')
+  confirm.mockRestore()
+})
+
+it('shows transfer states and cancels only an active or pending transfer at its endpoint', async () => {
+  const transfers = ['active', 'pending', 'completed', 'failed', 'cancelled'].map((state, index) => ({
+    id: `transfer-${index}`, filename: `${state}.txt`, direction: index ? 'download' : 'upload',
+    state, transferred_bytes: 2, expected_size: 4, failure_reason: state === 'failed' ? 'permission_denied' : null,
+  }))
+  const fetch = fileFetch(false, transfers)
+  vi.stubGlobal('fetch', fetch)
+  render(<FilesPanel device={device} csrf="token" />)
+  await screen.findByText('cancelled.txt')
+  for (const state of ['active', 'pending', 'completed', 'failed', 'cancelled']) {
+    expect(screen.getByText(new RegExp(`· ${state} ·`))).toBeTruthy()
+  }
+  expect(screen.getByText('permission denied')).toBeTruthy()
+  expect(screen.getAllByRole('button', { name: 'Cancel' })).toHaveLength(2)
+  fireEvent.click(screen.getAllByRole('button', { name: 'Cancel' })[1])
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/file-transfers/transfer-1/cancel', expect.objectContaining({
+    method: 'POST', headers: expect.objectContaining({ 'X-CSRF-Token': 'token' }),
+  })))
+  await waitFor(() => expect(screen.getAllByRole('button', { name: 'Cancel' })).toHaveLength(1))
+})

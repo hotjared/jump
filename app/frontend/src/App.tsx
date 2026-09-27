@@ -9,6 +9,7 @@ import QuickConnect, { type QuickPreference } from './QuickConnect'
 const TerminalPanel = lazy(() => import('./TerminalPanel'))
 const RemotePanel = lazy(() => import('./RemotePanel'))
 const SessionWorkspace = lazy(() => import('./SessionWorkspace'))
+const FilesPanel = lazy(() => import('./FilesPanel'))
 
 type Named = { id: string; name: string }
 type Device = {
@@ -163,7 +164,9 @@ export default function App() {
     </aside>
     <main className="main">
       <header className="topbar"><div className="breadcrumbs">Workspace <span>/</span> <strong>{activeSession ? activeSession.name + ' · ' + activeSession.protocol : page}</strong></div><div className="top-right"><span className="live-dot" /> System ready</div></header>
-      <Suspense fallback={null}><SessionWorkspace sessions={sessions} activeId={activeSessionId} select={id => { setActiveSessionId(id); setSelected(null) }} close={closeSession} /></Suspense>
+      <Suspense fallback={null}><SessionWorkspace sessions={sessions} activeId={activeSessionId} select={id => { setActiveSessionId(id); setSelected(null) }} close={closeSession}
+        fileDevices={devices.filter(d => d.online && d.capabilities.includes('file_transfer_v1')).map(d => d.id)}
+        openFiles={id => { setSelected(id); setTab('Files') }} /></Suspense>
       <div className="content" hidden={Boolean(activeSessionId)}>
         {error && <div className="error" role="alert">{error}<button onClick={() => setError('')}>×</button></div>}
         {notice && <div className="quick-notice" role="status">{notice}<button className="text-button" onClick={() => setNotice('')}>×</button></div>}
@@ -240,7 +243,9 @@ export default function App() {
         onOpenExisting={() => { const session = sessions.find(item => item.deviceId === device.id && item.protocol === 'RDP'); if (session) { setActiveSessionId(session.id); setSelected(null) } }} /></Suspense>
       : tab === 'Terminal' ? <Suspense fallback={<div className="placeholder compact">Loading terminal…</div>}><TerminalPanel key={device.id} device={device} admin={user.role === 'admin'} mutate={mutate}
         existing={sessions.find((session): session is SshSession => session.deviceId === device.id && session.protocol === 'SSH')} onConnected={openSession}
-        onOpenExisting={() => { const session = sessions.find(item => item.deviceId === device.id); if (session) { setActiveSessionId(session.id); setSelected(null) } }} /></Suspense> : <div className="placeholder compact"><span>◇</span><h2>{tab} is not available yet</h2><p>Connection and action features arrive in a later phase.</p></div>}
+        onOpenExisting={() => { const session = sessions.find(item => item.deviceId === device.id); if (session) { setActiveSessionId(session.id); setSelected(null) } }} /></Suspense>
+      : tab === 'Files' ? user.role === 'admin' ? <Suspense fallback={<div className="placeholder compact">Loading files…</div>}><FilesPanel key={device.id} device={device} csrf={user.csrf} /></Suspense> : <div className="placeholder compact">Admin access required.</div>
+      : <div className="placeholder compact"><span>◇</span><h2>{tab} is not available yet</h2><p>Connection and action features arrive in a later phase.</p></div>}
     </aside></div>}
     {enrolling && <div className="overlay" onClick={() => setEnrolling(false)}><div className="modal" onClick={e => e.stopPropagation()}><button className="close" aria-label="Close" onClick={() => setEnrolling(false)}>×</button><p className="eyebrow">NEW ENDPOINT</p><h2>Enroll a device</h2>
       {!issued && <><p>Choose the operating system, download its native agent, then generate a single-use token.</p><div className="platform">{(['linux','windows'] as Platform[]).map(v => <button key={v} type="button" aria-pressed={platform === v} className={platform === v ? 'chosen' : ''} onClick={() => setPlatform(v)}>{v === 'windows' ? '⊞  Windows amd64' : '⌘  Linux amd64'}</button>)}</div></>}

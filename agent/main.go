@@ -50,37 +50,45 @@ type identity struct {
 	PrivateKey string `json:"private_key"`
 }
 type message struct {
-	Version       int      `json:"version"`
-	Type          string   `json:"type"`
-	DeviceID      string   `json:"device_id,omitempty"`
-	ConnectionID  string   `json:"connection_id,omitempty"`
-	Challenge     string   `json:"challenge,omitempty"`
-	Signature     string   `json:"signature,omitempty"`
-	Metadata      metadata `json:"metadata,omitempty"`
-	SessionID     string   `json:"session_id,omitempty"`
-	Kind          string   `json:"kind,omitempty"`
-	Username      string   `json:"username,omitempty"`
-	Secret        string   `json:"secret,omitempty"`
-	HostKey       string   `json:"host_key,omitempty"`
-	Fingerprint   string   `json:"fingerprint,omitempty"`
-	Code          string   `json:"code,omitempty"`
-	Data          string   `json:"data,omitempty"`
-	Columns       int      `json:"columns,omitempty"`
-	Rows          int      `json:"rows,omitempty"`
-	OperationID   string   `json:"operation_id,omitempty"`
-	TargetVersion string   `json:"target_version,omitempty"`
-	Platform      string   `json:"platform,omitempty"`
-	Architecture  string   `json:"architecture,omitempty"`
-	DownloadURL   string   `json:"download_url,omitempty"`
-	SHA256        string   `json:"sha256,omitempty"`
-	State         string   `json:"state,omitempty"`
-	Reason        string   `json:"reason,omitempty"`
+	Version       int         `json:"version"`
+	Type          string      `json:"type"`
+	DeviceID      string      `json:"device_id,omitempty"`
+	ConnectionID  string      `json:"connection_id,omitempty"`
+	Challenge     string      `json:"challenge,omitempty"`
+	Signature     string      `json:"signature,omitempty"`
+	Metadata      metadata    `json:"metadata,omitempty"`
+	SessionID     string      `json:"session_id,omitempty"`
+	Kind          string      `json:"kind,omitempty"`
+	Username      string      `json:"username,omitempty"`
+	Secret        string      `json:"secret,omitempty"`
+	HostKey       string      `json:"host_key,omitempty"`
+	Fingerprint   string      `json:"fingerprint,omitempty"`
+	Code          string      `json:"code,omitempty"`
+	Data          string      `json:"data,omitempty"`
+	Columns       int         `json:"columns,omitempty"`
+	Rows          int         `json:"rows,omitempty"`
+	OperationID   string      `json:"operation_id,omitempty"`
+	TargetVersion string      `json:"target_version,omitempty"`
+	Platform      string      `json:"platform,omitempty"`
+	Architecture  string      `json:"architecture,omitempty"`
+	DownloadURL   string      `json:"download_url,omitempty"`
+	SHA256        string      `json:"sha256,omitempty"`
+	State         string      `json:"state,omitempty"`
+	Reason        string      `json:"reason,omitempty"`
+	TransferID    string      `json:"transfer_id,omitempty"`
+	Path          string      `json:"path,omitempty"`
+	Name          string      `json:"name,omitempty"`
+	Overwrite     bool        `json:"overwrite,omitempty"`
+	Size          int64       `json:"size,omitempty"`
+	Entries       []fileEntry `json:"entries"`
+	Offset        int         `json:"offset,omitempty"`
+	More          bool        `json:"more,omitempty"`
 }
 
 func capabilitiesFor(goos, arch string) []string {
 	caps := []string{"filesystem", "system_info"}
 	if arch == "amd64" && (goos == "linux" || goos == "windows") {
-		caps = append(caps, "agent_update_v1")
+		caps = append(caps, "agent_update_v1", "file_transfer_v1")
 	}
 	if goos == "windows" {
 		return append(caps, "rdp", "rdp_tunnel_v1", "powershell")
@@ -272,6 +280,8 @@ func connect(ctx context.Context, id identity) error {
 	tcpContext, stopTCP := context.WithCancel(ctx)
 	tcp := &tcpMux{send: mux.send, ctx: tcpContext, cancel: stopTCP, streams: make(map[string]*tcpStream)}
 	defer tcp.closeAll()
+	files := newFileMux(mux.send)
+	defer files.closeAll()
 	conn.SetReadDeadline(time.Now().Add(75 * time.Second))
 	conn.SetPingHandler(func(data string) error {
 		conn.SetReadDeadline(time.Now().Add(75 * time.Second))
@@ -299,7 +309,7 @@ func connect(ctx context.Context, id identity) error {
 				}
 				continue
 			}
-			if incoming.Version != 1 || !(tcp.handle(incoming) || mux.handle(incoming)) {
+			if incoming.Version != 1 || !(files.handle(incoming) || tcp.handle(incoming) || mux.handle(incoming)) {
 				done <- errors.New("invalid session frame")
 				return
 			}

@@ -4,6 +4,7 @@ from enum import StrEnum
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -190,6 +191,26 @@ class AgentUpdate(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_reason: Mapped[str | None] = mapped_column(String(64))
     __table_args__ = (Index("ix_agent_updates_device", "device_id"),)
+
+
+class FileTransfer(Base):
+    __tablename__ = "file_transfers"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    device_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"))
+    connection_id: Mapped[str] = mapped_column(String(36))
+    direction: Mapped[str] = mapped_column(String(16))
+    remote_path: Mapped[str] = mapped_column(String(4096))
+    filename: Mapped[str] = mapped_column(String(255))
+    expected_size: Mapped[int | None] = mapped_column(BigInteger)
+    transferred_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    state: Mapped[str] = mapped_column(String(16), default="pending")
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    failure_reason: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_file_transfers_device", "device_id"),)
 
 
 class AuditEvent(Base):

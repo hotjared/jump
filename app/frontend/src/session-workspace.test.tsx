@@ -75,6 +75,8 @@ beforeEach(() => {
     if (input.endsWith('/credentials') && !init?.method) return response([{ id: 'cred', label: 'Owner', username: 'owner', kind: 'linux_password' }])
     if (input.endsWith('/quick-connect-preferences') && init?.method === 'PUT') return response({ device_id: 'docker01', protocol: 'ssh', credential_id: 'cred', preferred: true })
     if (input.endsWith('/ssh-sessions') && init?.method === 'POST') return response({ id: `ssh-${++nextSession}` })
+    if (input.includes('/files?')) return response({ entries: [], more: false })
+    if (input.endsWith('/file-transfers')) return response([])
     throw new Error(`Unexpected request: ${input}`)
   }))
 })
@@ -101,6 +103,22 @@ async function connectDevice(id: string) {
 }
 
 describe('session workspace', () => {
+
+  it('opens the device Files UI from an active SSH session without recreating or disconnecting it', async () => {
+    devices = [makeDevice('docker01', ['ssh', 'ssh_terminal_v1', 'file_transfer_v1'])]
+    render(<App />)
+    const socket = await connectDevice('docker01')
+    const count = FakeSocket.instances.length
+    const created = terminalMocks.created
+    fireEvent.click(screen.getByRole('button', { name: 'Files' }))
+    await screen.findByText('This directory is empty.')
+    expect(screen.getByText('DEVICE DETAILS')).toBeTruthy()
+    expect(requests).toContain('/api/devices/docker01/files?path=%2F&offset=0')
+    expect(FakeSocket.instances).toHaveLength(count)
+    expect(terminalMocks.created).toBe(created)
+    expect(socket.readyState).toBe(1)
+    expect(socket.sent.some(message => JSON.parse(message).type === 'session_close')).toBe(false)
+  })
 
   it('uses named columns and keeps Quick Connect separate from Device Details', async () => {
     render(<App />)
