@@ -226,12 +226,12 @@ def test_download_stream_and_safe_header(client, db, monkeypatch):
 
     monkeypatch.setattr(main, "file_socket", socket)
     result = client.get(
-        f"/api/devices/{target.id}/files/download", params={"path": "/tmp/private.txt"}
+        f"/api/devices/{target.id}/files/download", params={"path": r"/tmp/back\slash"}
     )
     assert result.status_code == 200, result.text
     assert result.content == payload
     assert result.headers["content-length"] == str(len(payload))
-    assert "filename*=UTF-8''private.txt" in result.headers["content-disposition"]
+    assert "filename*=UTF-8''back%5Cslash" in result.headers["content-disposition"]
     assert len([frame for frame in sockets[0].sent if frame["type"] == "file_ack"]) == 2
     assert sockets[0].closed
     assert (
