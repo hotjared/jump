@@ -40,4 +40,4 @@
 .session-tab button:focus-visible,.session-heading button:focus-visible{outline:2px solid #dce5ed;outline-offset:2px}
 .workspace-desktop{flex:1;min-height:0;min-width:0;overflow:hidden;background:#111318;border:1px solid #303337;border-radius:8px 8px 0 0;display:flex;align-items:center;justify-content:center}
 .workspace-desktop>div{max-width:100%;max-height:100%;overflow:hidden}
-.session-actions{display:flex;gap:8px}.session-view:fullscreen{background:#111318}
+.session-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px}.clipboard-feedback{font-size:12px;color:#78cba1}.session-view:fullscreen{background:#111318}

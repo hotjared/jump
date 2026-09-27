@@ -156,10 +156,21 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(
                     await second_writer.wait_closed()
             writer.write(rdp.instruction("ready", "opaque-id"))
             writer.write(rdp.instruction("sync", "1"))
+            if not ready_send_fails:
+                writer.write(rdp.instruction("clipboard", "7", "text/plain"))
+                writer.write(
+                    rdp.instruction("blob", "7", base64.b64encode(b"remote secret").decode())
+                )
+                writer.write(rdp.instruction("end", "7"))
             await writer.drain()
             if not ready_send_fails:
-                _, received = await rdp.read_instruction(reader)
-                assert received == ["disconnect"]  # The internal ping never reaches guacd.
+                received = [(await rdp.read_instruction(reader))[1] for _ in range(4)]
+                assert received == [
+                    ["clipboard", "8", "text/plain"],
+                    ["blob", "8", base64.b64encode(b"local secret").decode()],
+                    ["end", "8"],
+                    ["disconnect"],
+                ]  # The internal ping never reaches guacd.
             await reader.read()
             tunnel_writer.close()
             writer.close()
@@ -224,6 +235,8 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(
                 self.sent = []
                 self.ping_echoed = asyncio.Event()
                 self.synced = asyncio.Event()
+                self.remote_ended = asyncio.Event()
+                self.next_frame = 0
 
             async def send_text(self, raw):
                 if ready_send_fails and rdp.parse_instruction(raw)[0] == "ready":
@@ -234,12 +247,24 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(
                     self.ping_echoed.set()
                 if parts == ["sync", "1"]:
                     self.synced.set()
+                if parts == ["end", "7"]:
+                    self.remote_ended.set()
 
             async def receive_text(self):
                 if not self.ping_echoed.is_set():
                     return rdp.instruction("", "ping", "12345").decode()
                 await self.synced.wait()
-                return rdp.instruction("disconnect").decode()
+                frames = [
+                    rdp.instruction("clipboard", "8", "text/plain"),
+                    rdp.instruction("blob", "8", base64.b64encode(b"local secret").decode()),
+                    rdp.instruction("end", "8"),
+                    rdp.instruction("disconnect"),
+                ]
+                if self.next_frame == 3:
+                    await self.remote_ended.wait()
+                frame = frames[self.next_frame]
+                self.next_frame += 1
+                return frame.decode()
 
         browser = Browser()
         started = []
@@ -272,6 +297,12 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(
                 assert rdp.parse_instruction(browser.sent[0])[0] == "ready"
                 assert ["", "ping", "12345"] in [rdp.parse_instruction(raw) for raw in browser.sent]
                 assert ["sync", "1"] in [rdp.parse_instruction(raw) for raw in browser.sent]
+                assert ["clipboard", "7", "text/plain"] in [
+                    rdp.parse_instruction(raw) for raw in browser.sent
+                ]
+                assert ["blob", "7", base64.b64encode(b"remote secret").decode()] in [
+                    rdp.parse_instruction(raw) for raw in browser.sent
+                ]
             assert seen["username"] == "Administrator"
             assert seen["password"] == "secret-password" and seen["domain"] == "LAB"
             assert seen["security"] == "any" and seen["ignore-cert"] == "true"
@@ -288,10 +319,11 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(
             ) in caplog.text
             assert "secret-password" not in caplog.text
             assert "rdp request" not in caplog.text
+            assert "local secret" not in caplog.text and "remote secret" not in caplog.text
             assert (
                 seen["enable-drive"] == "false"
-                and seen["disable-copy"] == "true"
-                and seen["disable-paste"] == "true"
+                and seen["disable-copy"] == "false"
+                and seen["disable-paste"] == "false"
                 and seen["disable-audio"] == "true"
                 and seen["enable-printing"] == "false"
             )
@@ -318,3 +350,36 @@ def test_guacd_error_categories_are_sanitized():
         == "authentication"
     )
     assert rdp.guacd_error_class(["error", "password=hidden", "519"]) == "other"
+
+
+def test_clipboard_streams_are_text_only_bounded_and_cleaned_up(caplog):
+    streams = rdp.ClipboardStreams()
+    assert streams.process(["clipboard", "1", "text/plain;charset=utf-8"]) == (True, False)
+    payload = base64.b64encode(b"private clipboard text").decode()
+    assert streams.process(["blob", "1", payload]) == (True, False)
+    assert streams.process(["end", "1"]) == (True, False)
+    assert not streams.active and streams.awaiting_ack == {"1"}
+    assert "private clipboard text" not in caplog.text
+    with pytest.raises(ValueError, match="untracked"):
+        streams.process(["blob", "2", payload])
+    with pytest.raises(ValueError, match="untracked"):
+        streams.process(["end", "2"])
+    for opcode in ("file", "pipe", "filesystem", "object", "body"):
+        with pytest.raises(ValueError):
+            streams.process([opcode, "3", "text/plain"])
+
+    assert streams.process(["clipboard", "2", "image/png"]) == (False, True)
+    assert streams.process(["blob", "2", payload]) == (False, False)
+    assert streams.process(["end", "2"]) == (False, False)
+    assert "2" not in streams.ignored
+    assert streams.process(["clipboard", "3", "text/plain"]) == (True, False)
+    assert streams.process(
+        ["blob", "3", base64.b64encode(b"x" * rdp.CLIPBOARD_MAX_BYTES).decode()]
+    ) == (True, False)
+    assert streams.process(["blob", "3", base64.b64encode(b"y").decode()]) == (False, True)
+    assert "3" not in streams.active
+    assert streams.process(["end", "3"]) == (False, False)
+    assert not streams.ignored
+    assert streams.process(["clipboard", "4", "text/plain"]) == (True, False)
+    assert streams.process(["blob", "4", base64.b64encode(b"\xff").decode()]) == (False, True)
+    assert streams.process(["end", "4"]) == (False, False)
