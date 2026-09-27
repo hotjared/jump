@@ -102,6 +102,23 @@ async function connectDevice(id: string) {
 
 describe('session workspace', () => {
 
+  it('uses named columns and keeps Quick Connect separate from Device Details', async () => {
+    render(<App />)
+    const details = await screen.findByRole('button', { name: 'Details for docker01' })
+    const row = details.closest('.device-row')!
+    const columns = ['device', 'status', 'user', 'group', 'last-seen', 'connect']
+    const heading = document.querySelector('.table-heading')!
+    for (const column of columns) {
+      expect(heading.querySelector(`.device-col-${column}`)).not.toBeNull()
+      expect(row.querySelector(`.device-col-${column}`)).not.toBeNull()
+    }
+    fireEvent.click(within(row as HTMLElement).getByRole('button', { name: 'Quick Connect options for docker01' }))
+    expect(screen.queryByText('DEVICE DETAILS')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Connect with SSH' })).toBeTruthy()
+    fireEvent.click(details)
+    expect(screen.getByText('DEVICE DETAILS')).toBeTruthy()
+  })
+
   it('starts Quick Connect in the background and opens only when its tab is clicked', async () => {
     render(<App />)
     await screen.findAllByRole('button', { name: 'Connect SSH' })

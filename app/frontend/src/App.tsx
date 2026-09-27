@@ -181,13 +181,13 @@ export default function App() {
             <select aria-label="Group" value={group} onChange={e => setGroup(e.target.value)}><option value="all">All groups</option>{groups.map(g => <option value={g.id} key={g.id}>{g.name}</option>)}</select>
             <select aria-label="Tag" value={tag} onChange={e => setTag(e.target.value)}><option value="all">All tags</option>{tags.map(t => <option value={t.id} key={t.id}>{t.name}</option>)}</select>
           </div>
-          <section className="panel table-panel"><div className="table-heading"><span>DEVICE</span><span>STATUS</span><span>CURRENT USER</span><span>GROUP / TAGS</span><span>LAST SEEN</span><span>CONNECT</span></div>
+          <section className="panel table-panel"><div className="table-heading"><span className="device-col-device">DEVICE</span><span className="device-col-status">STATUS</span><span className="device-col-user">CURRENT USER</span><span className="device-col-group">GROUP / TAGS</span><span className="device-col-last-seen">LAST SEEN</span><span className="device-col-connect">CONNECT</span></div>
             {visible.map(d => <div className="device-row" key={d.id} onClick={event => { if (!(event.target as HTMLElement).closest('.quick-cell')) { setSelected(d.id); setTab('Overview') } }}>
               <button className="device-row-details" aria-label={`Details for ${d.display_name || d.hostname}`} onClick={() => { setSelected(d.id); setTab('Overview') }} />
-              <span className="device-name"><span className="os-icon">{d.os_family === 'windows' ? '⊞' : '⌘'}</span><span><strong>{d.display_name || d.hostname}</strong><small>{d.hostname} · {d.os_family} {d.os_version}</small></span></span>
-              <span className={d.online ? 'badge online' : 'badge offline'}><i />{d.identity_state === 'revoked' ? 'Revoked' : d.online ? 'Online' : 'Offline'}</span><span className="muted">{d.current_user || '—'}</span>
-              <span className="muted">{d.group?.name || 'Ungrouped'} {d.tags.slice(0, 2).map(t => <em key={t.id}>{t.name}</em>)}</span><span className="muted">{formatDate(d.last_seen_at)}</span>
-              <span className="quick-cell">{user.role === 'admin' && <QuickConnect device={d} preferences={quickPreferences.filter(p => p.device_id === d.id)}
+              <span className="device-name device-col-device"><span className="os-icon">{d.os_family === 'windows' ? '⊞' : '⌘'}</span><span><strong>{d.display_name || d.hostname}</strong><small>{d.hostname} · {d.os_family} {d.os_version}</small></span></span>
+              <span className={`device-col-status ${d.online ? 'badge online' : 'badge offline'}`}><i />{d.identity_state === 'revoked' ? 'Revoked' : d.online ? 'Online' : 'Offline'}</span><span className="muted device-col-user">{d.current_user || '—'}</span>
+              <span className="muted device-col-group">{d.group?.name || 'Ungrouped'} {d.tags.slice(0, 2).map(t => <em key={t.id}>{t.name}</em>)}</span><span className="muted device-col-last-seen">{formatDate(d.last_seen_at)}</span>
+              <span className="quick-cell device-col-connect">{user.role === 'admin' && <QuickConnect device={d} preferences={quickPreferences.filter(p => p.device_id === d.id)}
                 mutate={mutate} onPreference={preference => setQuickPreferences(previous => [...previous.filter(p => p.device_id !== preference.device_id || p.protocol !== preference.protocol).map(p => p.device_id === preference.device_id ? { ...p, preferred: false } : p), preference])}
                 onConnected={session => { openSession(session, { activate: false }); setNotice(`${session.protocol} session started for ${session.name}`) }}
                 onError={setError} />}</span>
