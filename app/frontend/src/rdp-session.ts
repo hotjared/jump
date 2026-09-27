@@ -1,10 +1,15 @@
 import Guacamole from 'guacamole-common-js'
 import type { SessionState } from './ssh-session'
 
+const MAX_CLIPBOARD_BYTES = 1024 * 1024
+
 export class RdpSession {
   readonly protocol = 'RDP' as const
   state: SessionState = 'connecting'
   error = ''
+  clipboardError = ''
+  hasRemoteClipboard = false
+  private remoteClipboard: string | null = null
   private listeners = new Set<() => void>()
   private client: any = null
 
@@ -16,6 +21,45 @@ export class RdpSession {
   }
   private notify() { this.listeners.forEach(listener => listener()) }
 
+  async pasteLocalClipboardToRemote() {
+    if (this.state !== 'connected' || !this.client) return false
+    try {
+      const value = await navigator.clipboard.readText()
+      if (new TextEncoder().encode(value).length > MAX_CLIPBOARD_BYTES) {
+        this.clipboardError = 'Clipboard text is too large (1 MiB maximum).'
+        this.notify(); return false
+      }
+      if (this.state !== 'connected' || !this.client) return false
+      const stream = this.client.createClipboardStream('text/plain')
+      const writer = new Guacamole.StringWriter(stream)
+      writer.onack = (status: { code: number }) => {
+        if (status.code >= 0x0100) {
+          this.clipboardError = 'Remote clipboard rejected the text.'
+          this.notify()
+        }
+      }
+      writer.sendText(value)
+      writer.sendEnd()
+      this.clipboardError = ''; this.notify()
+      return true
+    } catch {
+      this.clipboardError = 'Could not read your clipboard. Check browser clipboard permission.'
+      this.notify(); return false
+    }
+  }
+
+  async copyRemoteClipboardToLocal() {
+    if (this.state !== 'connected' || this.remoteClipboard === null) return false
+    try {
+      await navigator.clipboard.writeText(this.remoteClipboard)
+      this.clipboardError = ''; this.notify()
+      return true
+    } catch {
+      this.clipboardError = 'Could not write to your clipboard. Check browser clipboard permission.'
+      this.notify(); return false
+    }
+  }
+
   attach(node: HTMLDivElement, visible: () => boolean) {
     const url = new URL(`/ws/rdp-sessions/${this.id}`, location.href)
     url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -23,6 +67,34 @@ export class RdpSession {
     tunnel.receiveTimeout = 45000
     const client = new Guacamole.Client(tunnel)
     this.client = client
+    client.onclipboard = (stream: any, mimetype: string) => {
+      if (!/^text\/plain(?:;charset=utf-8)?$/i.test(mimetype)) {
+        stream.sendAck('Only plain text clipboard is supported', 783)
+        return
+      }
+      const reader = new Guacamole.StringReader(stream)
+      let value = ''
+      let bytes = 0
+      let valid = true
+      reader.ontext = (chunk: string) => {
+        bytes += new TextEncoder().encode(chunk).length
+        if (bytes > MAX_CLIPBOARD_BYTES) {
+          valid = false; value = ''
+          stream.sendAck('Clipboard text is too large', 783)
+          this.clipboardError = 'Remote clipboard text is too large (1 MiB maximum).'
+          this.notify(); return
+        }
+        if (valid) value += chunk
+        stream.sendAck('OK', 0)
+      }
+      reader.onend = () => {
+        if (!valid || this.client !== client || this.state !== 'connected') return
+        this.remoteClipboard = value
+        this.hasRemoteClipboard = true
+        this.notify()
+      }
+      stream.sendAck('OK', 0)
+    }
     const display = client.getDisplay()
     node.appendChild(display.getElement())
     const mouse = new Guacamole.Mouse(display.getElement())
@@ -83,13 +155,16 @@ export class RdpSession {
       display.onresize = null
       keyboard.onkeydown = keyboard.onkeyup = null
       mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = null
+      client.onclipboard = null
       client.disconnect(); this.client = null
+      this.remoteClipboard = null; this.hasRemoteClipboard = false
       display.getElement().remove()
     }
   }
 
   disconnect() {
     this.client?.disconnect()
+    this.remoteClipboard = null; this.hasRemoteClipboard = false
     this.state = 'disconnected'; this.notify()
   }
 }
