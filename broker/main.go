@@ -56,6 +56,14 @@ type message struct {
 	SHA256        string          `json:"sha256,omitempty"`
 	State         string          `json:"state,omitempty"`
 	Reason        string          `json:"reason,omitempty"`
+	TransferID    string          `json:"transfer_id,omitempty"`
+	Path          string          `json:"path,omitempty"`
+	Name          string          `json:"name,omitempty"`
+	Overwrite     bool            `json:"overwrite,omitempty"`
+	Size          int64           `json:"size,omitempty"`
+	Entries       json.RawMessage `json:"entries,omitempty"`
+	Offset        int             `json:"offset,omitempty"`
+	More          bool            `json:"more,omitempty"`
 }
 
 type sessionRoute struct {
@@ -83,20 +91,22 @@ func (r *sessionRoute) closeReason() string {
 }
 
 type broker struct {
-	api             string
-	token           string
-	client          *http.Client
-	mu              sync.Mutex
-	active          map[string]*websocket.Conn
-	connections     map[string]string
-	capabilities    map[string]bool
-	rdpCapabilities map[string]bool
-	updates         map[string]*websocket.Conn
-	updating        map[string]bool
-	writers         sync.Map // *websocket.Conn -> *sync.Mutex
-	sessions        map[string]*sessionRoute
-	limits          map[string]window
-	wg              sync.WaitGroup
+	api              string
+	token            string
+	client           *http.Client
+	mu               sync.Mutex
+	active           map[string]*websocket.Conn
+	connections      map[string]string
+	capabilities     map[string]bool
+	rdpCapabilities  map[string]bool
+	updates          map[string]*websocket.Conn
+	updating         map[string]bool
+	writers          sync.Map // *websocket.Conn -> *sync.Mutex
+	sessions         map[string]*sessionRoute
+	files            map[string]*sessionRoute
+	fileCapabilities map[string]bool
+	limits           map[string]window
+	wg               sync.WaitGroup
 }
 
 func (b *broker) write(conn *websocket.Conn, value message) error {
@@ -121,6 +131,30 @@ func (b *broker) closeRoute(id string, route *sessionRoute) {
 }
 
 func (b *broker) agentFrame(conn *websocket.Conn, msg message) bool {
+	if strings.HasPrefix(msg.Type, "file_") {
+		if len(msg.TransferID) != 36 || len(msg.Data) > 44000 || (msg.Type != "file_list_result" && msg.Type != "file_opened" && msg.Type != "file_chunk" && msg.Type != "file_finished" && msg.Type != "file_error") {
+			return false
+		}
+		if msg.Type == "file_chunk" {
+			data, err := base64.StdEncoding.DecodeString(msg.Data)
+			if err != nil || len(data) > 32768 {
+				return false
+			}
+		}
+		b.mu.Lock()
+		route := b.files[msg.TransferID]
+		b.mu.Unlock()
+		if route == nil || route.agent != conn {
+			return true
+		}
+		select {
+		case route.frames <- msg:
+			return true
+		default:
+			b.closeFileRoute(msg.TransferID, route)
+			return true
+		}
+	}
 	if msg.Type == "agent_update_status" {
 		if len(msg.OperationID) != 36 || (msg.State != "downloading" && msg.State != "installing" && msg.State != "restarting" && msg.State != "failed") {
 			return false
@@ -183,6 +217,143 @@ func (b *broker) agentFrame(conn *websocket.Conn, msg message) bool {
 		}
 		b.closeRoute(msg.SessionID, route)
 		return true // close only the slow session; keep presence and other streams alive
+	}
+}
+
+func (b *broker) closeFileRoute(id string, route *sessionRoute) {
+	route.once.Do(func() {
+		b.mu.Lock()
+		if b.files[id] == route {
+			delete(b.files, id)
+		}
+		b.mu.Unlock()
+		close(route.closed)
+	})
+}
+
+func (b *broker) cancelFile(w http.ResponseWriter, r *http.Request) {
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+b.token)) != 1 || r.Header.Get("Origin") != "" {
+		http.Error(w, "unauthorized", 401)
+		return
+	}
+	var request struct {
+		DeviceID string `json:"device_id"`
+		UserID   string `json:"user_id"`
+	}
+	if json.NewDecoder(io.LimitReader(r.Body, 512)).Decode(&request) != nil {
+		http.Error(w, "invalid", 400)
+		return
+	}
+	id := r.PathValue("id")
+	if len(id) != 36 || len(request.DeviceID) != 36 || len(request.UserID) != 36 {
+		http.Error(w, "invalid", 400)
+		return
+	}
+	b.mu.Lock()
+	route := b.files[id]
+	b.mu.Unlock()
+	if route != nil && (route.deviceID != request.DeviceID || route.ownerID != request.UserID) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	if route != nil {
+		b.closeFileRoute(id, route)
+		_ = b.write(route.agent, message{Version: 1, Type: "file_cancel", TransferID: id})
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// One authenticated backend WebSocket owns one transfer. The broker checks the
+// database claim and the exact live agent connection before forwarding frames.
+func (b *broker) internalFile(w http.ResponseWriter, r *http.Request) {
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+b.token)) != 1 || r.Header.Get("Origin") != "" {
+		http.Error(w, "unauthorized", 401)
+		return
+	}
+	id, deviceID, connectionID, ownerID := r.PathValue("id"), r.URL.Query().Get("device_id"), r.URL.Query().Get("connection_id"), r.URL.Query().Get("user_id")
+	if len(id) != 36 || len(deviceID) != 36 || len(connectionID) != 36 || len(ownerID) != 36 {
+		http.Error(w, "invalid transfer", 400)
+		return
+	}
+	if b.call(r.Context(), "GET", "/api/internal/file-transfers/"+id+"/authorize?device_id="+deviceID+"&connection_id="+connectionID+"&user_id="+ownerID, nil, nil) != nil {
+		http.Error(w, "transfer unauthorized", 403)
+		return
+	}
+	b.mu.Lock()
+	agent := b.active[deviceID]
+	count := 0
+	for _, route := range b.files {
+		if route.deviceID == deviceID {
+			count++
+		}
+	}
+	allowed := agent != nil && b.connections[deviceID] == connectionID && b.fileCapabilities[deviceID] && b.files[id] == nil && count < 4 && !b.updating[deviceID]
+	b.mu.Unlock()
+	if !allowed {
+		http.Error(w, "agent unavailable", 409)
+		return
+	}
+	conn, err := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	conn.SetReadLimit(maxMessage)
+	route := &sessionRoute{deviceID: deviceID, ownerID: ownerID, agent: agent, frames: make(chan message, 8), closed: make(chan struct{})}
+	b.mu.Lock()
+	count = 0
+	for _, existing := range b.files {
+		if existing.deviceID == deviceID {
+			count++
+		}
+	}
+	if b.active[deviceID] != agent || b.connections[deviceID] != connectionID || b.files[id] != nil || !b.fileCapabilities[deviceID] || count >= 4 {
+		b.mu.Unlock()
+		return
+	}
+	if b.files == nil {
+		b.files = make(map[string]*sessionRoute)
+	}
+	b.files[id] = route
+	b.mu.Unlock()
+	defer func() {
+		b.closeFileRoute(id, route)
+		_ = b.write(agent, message{Version: 1, Type: "file_cancel", TransferID: id})
+	}()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			var msg message
+			if conn.ReadJSON(&msg) != nil {
+				return
+			}
+			if msg.Version != 1 || msg.TransferID != id || len(msg.Path) > 4096 || len(msg.Name) > 255 || len(msg.Data) > 44000 || msg.Offset < 0 || msg.Offset > 10000 || (msg.Type != "file_list" && msg.Type != "file_upload_open" && msg.Type != "file_chunk" && msg.Type != "file_finish" && msg.Type != "file_download_open" && msg.Type != "file_cancel" && msg.Type != "file_ack") {
+				return
+			}
+			if msg.Type == "file_chunk" {
+				data, err := base64.StdEncoding.DecodeString(msg.Data)
+				if err != nil || len(data) > 32768 {
+					return
+				}
+			}
+			if b.write(agent, msg) != nil || msg.Type == "file_cancel" {
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		case <-route.closed:
+			return
+		case msg := <-route.frames:
+			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if conn.WriteJSON(msg) != nil || msg.Type == "file_finished" || msg.Type == "file_error" || msg.Type == "file_list_result" {
+				return
+			}
+		}
 	}
 }
 
@@ -638,13 +809,16 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 	if json.Unmarshal(auth.Metadata, &authInfo) != nil {
 		return
 	}
-	updateCapable, rdpCapable := false, false
+	updateCapable, rdpCapable, fileCapable := false, false, false
 	for _, capability := range authInfo.Capabilities {
 		if capability == "agent_update_v1" {
 			updateCapable = true
 		}
 		if capability == "rdp_tunnel_v1" {
 			rdpCapable = true
+		}
+		if capability == "file_transfer_v1" {
+			fileCapable = true
 		}
 	}
 	// Serialize registration with a revocation disconnect. The API locks the
@@ -670,9 +844,13 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 	if b.rdpCapabilities == nil {
 		b.rdpCapabilities = make(map[string]bool)
 	}
+	if b.fileCapabilities == nil {
+		b.fileCapabilities = make(map[string]bool)
+	}
 	b.connections[id] = connectionID
 	b.capabilities[id] = updateCapable
 	b.rdpCapabilities[id] = rdpCapable
+	b.fileCapabilities[id] = fileCapable
 	delete(b.updating, id)
 	b.mu.Unlock()
 	if previous != nil {
@@ -687,6 +865,7 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 			delete(b.connections, id)
 			delete(b.capabilities, id)
 			delete(b.rdpCapabilities, id)
+			delete(b.fileCapabilities, id)
 			delete(b.updating, id)
 		}
 		for operation, owner := range b.updates {
@@ -695,6 +874,18 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var routes []*sessionRoute
+		var fileRoutes []struct {
+			id    string
+			route *sessionRoute
+		}
+		for transferID, route := range b.files {
+			if route.agent == conn {
+				fileRoutes = append(fileRoutes, struct {
+					id    string
+					route *sessionRoute
+				}{transferID, route})
+			}
+		}
 		for _, route := range b.sessions {
 			if route.agent == conn {
 				routes = append(routes, route)
@@ -703,6 +894,9 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 		b.mu.Unlock()
 		for _, route := range routes {
 			b.closeRouteForAgent(route)
+		}
+		for _, item := range fileRoutes {
+			b.closeFileRoute(item.id, item.route)
 		}
 		b.writers.Delete(conn)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -854,6 +1048,8 @@ func main() {
 	internalMux.HandleFunc("POST /internal/devices/{id}/agent-update", b.agentUpdate)
 	internalMux.HandleFunc("GET /internal/sessions/{id}", b.internalSession)
 	internalMux.HandleFunc("GET /internal/rdp-streams/{id}", b.internalTCP)
+	internalMux.HandleFunc("GET /internal/file-streams/{id}", b.internalFile)
+	internalMux.HandleFunc("POST /internal/file-streams/{id}/cancel", b.cancelFile)
 	internalServer := &http.Server{Addr: ":8081", Handler: internalMux, ReadHeaderTimeout: 5 * time.Second}
 	server := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	shutdown, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

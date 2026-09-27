@@ -47,3 +47,14 @@
 .workspace-desktop{flex:1;min-height:0;min-width:0;overflow:hidden;background:#111318;border:1px solid #303337;border-radius:8px 8px 0 0;display:flex;align-items:center;justify-content:center}
 .workspace-desktop>div{max-width:100%;max-height:100%;overflow:hidden}
 .session-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px}.clipboard-feedback{font-size:12px;color:#78cba1}.session-view:fullscreen{background:#111318}
+
+.files-panel { display: flex; flex-direction: column; gap: .75rem; }
+.files-panel h3 { margin: 1rem 0 0; }
+.files-path { padding: .6rem .8rem; background: var(--surface, #1b1e24); border-radius: 6px; overflow-wrap: anywhere; font-family: monospace; }
+.files-list { min-height: 8rem; max-height: 48vh; overflow: auto; border: 1px solid #4448; border-radius: 6px; }
+.file-entry { width: 100%; display: flex; justify-content: space-between; align-items: center; text-align: left; gap: .8rem; padding: .65rem .8rem; border: 0; border-bottom: 1px solid #4444; background: transparent; color: inherit; cursor: pointer; }
+.file-entry:hover, .file-entry.selected { background: #8882; }
+.file-entry span { overflow-wrap: anywhere; }
+.file-entry small { white-space: nowrap; }
+.files-selection, .file-transfer { display: flex; flex-direction: column; align-items: flex-start; gap: .45rem; padding: .75rem; border: 1px solid #4448; border-radius: 6px; overflow-wrap: anywhere; }
+.file-transfer progress { width: 100%; }
