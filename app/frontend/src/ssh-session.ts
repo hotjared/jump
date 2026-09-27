@@ -5,6 +5,7 @@ type Frame = { type: string; data?: string; state?: string; code?: string; messa
 // A connection belongs to the application shell, never to the device drawer or
 // a particular page. Output received before xterm mounts is replayed on attach.
 export class SshSession {
+  readonly protocol = 'SSH' as const
   state: SessionState = 'connecting'
   error = ''
   fingerprint: string | null = null

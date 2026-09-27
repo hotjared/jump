@@ -3,6 +3,9 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { SshSession } from './ssh-session'
+import { RdpSession } from './rdp-session'
+
+export type WorkspaceSession = SshSession | RdpSession
 
 const MIN_COLUMNS = 20
 const MAX_COLUMNS = 500
@@ -82,8 +85,19 @@ function SessionTerminal({ session, visible }: { session: SshSession; visible: b
   return <div className="workspace-terminal" ref={node} aria-label={`${session.name} SSH terminal`} />
 }
 
+function SessionDesktop({ session, visible }: { session: RdpSession; visible: boolean }) {
+  const node = useRef<HTMLDivElement>(null)
+  const visibleRef = useRef(visible)
+  visibleRef.current = visible
+  useEffect(() => {
+    if (!node.current) return
+    return session.attach(node.current, () => visibleRef.current)
+  }, [session])
+  return <div className="workspace-desktop" ref={node} aria-label={`${session.name} RDP desktop`} />
+}
+
 export default function SessionWorkspace({ sessions, activeId, select, close }: {
-  sessions: SshSession[]; activeId: string | null; select: (id: string) => void; close: (id: string) => void
+  sessions: WorkspaceSession[]; activeId: string | null; select: (id: string) => void; close: (id: string) => void
 }) {
   const [, setRevision] = useState(0)
   const tabRefs = useRef(new Map<string, HTMLButtonElement>())
@@ -102,24 +116,25 @@ export default function SessionWorkspace({ sessions, activeId, select, close }: 
 
   if (!sessions.length) return null
   return <section className={`session-workspace ${activeId ? 'workspace-open' : ''}`} aria-label="Remote sessions">
-    <div className="session-tabs" role="tablist" aria-label="Active SSH sessions">
+    <div className="session-tabs" role="tablist" aria-label="Active remote sessions">
       {sessions.map(session => <div className={`session-tab ${activeId === session.id ? 'selected' : ''}`} key={session.id}>
         <button type="button" role="tab" aria-selected={activeId === session.id} aria-controls={`session-${session.id}`}
           ref={node => { if (node) tabRefs.current.set(session.id, node); else tabRefs.current.delete(session.id) }}
           onClick={() => select(session.id)}>
-          <span className={`session-dot ${session.state}`} aria-hidden="true" />{session.name} <small>SSH · {session.state}</small>
+          <span className={`session-dot ${session.state}`} aria-hidden="true" />{session.name} <small>{session.protocol} · {session.state}</small>
         </button>
-        <button type="button" className="session-tab-close" aria-label={`Close ${session.name} SSH session`} onClick={() => closeTab(session.id)}>×</button>
+        <button type="button" className="session-tab-close" aria-label={`Close ${session.name} ${session.protocol} session`} onClick={() => closeTab(session.id)}>×</button>
       </div>)}
     </div>
-    {sessions.map(session => <div id={`session-${session.id}`} role="tabpanel" aria-label={`${session.name} SSH session`}
+    {sessions.map(session => <div id={`session-${session.id}`} role="tabpanel" aria-label={`${session.name} ${session.protocol} session`}
       className="session-view" key={session.id} hidden={activeId !== session.id}>
-      <div className="session-heading"><div><strong>{session.name}</strong><span className="muted">{session.platform} · SSH</span>
+      <div className="session-heading"><div><strong>{session.name}</strong><span className="muted">{session.platform} · {session.protocol}</span>
         <span className={`session-state ${session.state}`}><i />{session.state}</span></div>
-        <button className="button" onClick={() => closeTab(session.id)}>Disconnect</button></div>
+        <div className="session-actions">{session.protocol === 'RDP' && <button className="button" onClick={e => e.currentTarget.closest('.session-view')?.requestFullscreen()}>Fullscreen</button>}
+          <button className="button" onClick={() => closeTab(session.id)}>Disconnect</button></div></div>
       {session.error && <p className="session-error" role="alert">{session.error}</p>}
-      <SessionTerminal session={session} visible={activeId === session.id} />
-      <div className="session-footer">Jump agent · SSH localhost:22</div>
+      {session.protocol === 'SSH' ? <SessionTerminal session={session} visible={activeId === session.id} /> : <SessionDesktop session={session} visible={activeId === session.id} />}
+      <div className="session-footer">Jump agent · {session.protocol === 'SSH' ? 'SSH localhost:22' : 'RDP localhost:3389'}</div>
     </div>)}
   </section>
 }

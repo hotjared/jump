@@ -1,5 +1,7 @@
 # Jump
 
+Browser RDP setup and limitations: [Browser RDP (Phase 2)](docs/browser-rdp.md).
+
 Jump is a self-hosted remote access foundation for a single environment. It provides OIDC sign-in, device enrollment, persistent outbound agent presence, device organization, audit events, and browser SSH terminals on Linux. RDP, files, and remote actions are not implemented yet.
 
 ## Components

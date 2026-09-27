@@ -26,8 +26,8 @@ def create_credential(
 ) -> Credential:
     if kind not in KINDS or not label or not username or not secret:
         raise ValueError("Invalid credential metadata")
-    if (kind == "windows_domain_password") != bool(domain):
-        raise ValueError("Domain is required only for domain credentials")
+    if domain and kind not in {"windows_password", "windows_domain_password"}:
+        raise ValueError("Domain is only supported for Windows credentials")
     item = Credential(
         id=uuid.uuid4(),
         device_id=device.id,

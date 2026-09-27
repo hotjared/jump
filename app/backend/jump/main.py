@@ -48,6 +48,7 @@ from .models import (
     User,
     now,
 )
+from .rdp import instruction, rdp_gateway
 from .releases import agent_downloads, newer_release, release_asset, release_number
 from .schemas import (
     CredentialInput,
@@ -57,6 +58,7 @@ from .schemas import (
     Metadata,
     NameInput,
     PresenceInput,
+    RDPSessionInput,
     SSHSessionInput,
 )
 from .security import consume_enrollment, create_enrollment, map_oidc_user, require_admin
@@ -339,6 +341,7 @@ def request_agent_update(
     if latest := latest_update(db, device.id):
         if latest.state in UPDATE_ACTIVE:
             raise HTTPException(409, "An agent update is already running")
+    expire_pending_rdp(db, device.id)
     active = db.scalar(
         select(RemoteSession.id)
         .where(
@@ -494,6 +497,13 @@ def delete_device(
         raise HTTPException(409, "Revoke the agent identity before deleting this device")
     if item.online:
         raise HTTPException(409, "Device must be offline before deletion")
+    expire_pending_rdp(db, device_id)
+    if db.scalar(
+        select(RemoteSession.id).where(
+            RemoteSession.device_id == device_id, RemoteSession.state.in_(["connecting", "active"])
+        )
+    ):
+        raise HTTPException(409, "Close active sessions before deleting this device")
 
     former = {
         "device_id": str(item.id),
@@ -834,7 +844,7 @@ def reconcile(db: Session = Depends(get_db)):
     for session in db.scalars(
         select(RemoteSession).where(RemoteSession.state.in_(["connecting", "active"]))
     ).all():
-        finish_ssh_session(db, session, "service_restarted")
+        finish_remote_session(db, session, "service_restarted")
     db.commit()
     return {"ok": True}
 
@@ -856,7 +866,13 @@ SSH_ERRORS = {
 
 
 def credential_output(item: Credential) -> dict:
-    return {"id": item.id, "label": item.label, "kind": item.kind, "username": item.username}
+    return {
+        "id": item.id,
+        "label": item.label,
+        "kind": item.kind,
+        "username": item.username,
+        "domain": item.domain,
+    }
 
 
 @app.get("/api/devices/{device_id}/credentials")
@@ -881,8 +897,10 @@ def add_credential(
     device = db.get(Device, device_id)
     if not device:
         raise HTTPException(404)
-    if device.os_family != "linux":
-        raise HTTPException(400, "SSH credentials require a Linux device")
+    if (device.os_family == "linux" and body.kind not in SSH_KINDS) or (
+        device.os_family == "windows" and body.kind != "windows_password"
+    ):
+        raise HTTPException(400, "Credential kind does not match the device")
     secret_bytes = body.secret.encode()
     if len(secret_bytes) > 16384:
         raise HTTPException(400, "Credential is too large")
@@ -895,6 +913,7 @@ def add_credential(
             kind=body.kind,
             username=body.username,
             secret=secret_bytes,
+            domain=body.domain,
         )
     except ValueError as exc:
         raise HTTPException(400, "Invalid credential") from exc
@@ -966,24 +985,104 @@ def new_ssh_session(
         credential_id=credential.id,
         columns=body.columns,
         rows=body.rows,
+        protocol="ssh",
     )
     db.add(session)
     db.commit()
     return {"id": session.id, "state": session.state, "created_at": session.created_at}
 
 
-def finish_ssh_session(db: Session, session: RemoteSession, reason: str | None = None) -> None:
+@app.post("/api/devices/{device_id}/rdp-sessions", status_code=201)
+def new_rdp_session(
+    device_id: uuid.UUID,
+    body: RDPSessionInput,
+    user: User = Depends(admin),
+    db: Session = Depends(get_db),
+):
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(404)
+    if not device.online or not device.connection_id:
+        raise HTTPException(409, "Device is offline")
+    if not device.agent_identity or device.agent_identity.revoked_at:
+        raise HTTPException(409, "Agent identity is revoked")
+    if device.os_family != "windows":
+        raise HTTPException(409, "Device does not support RDP")
+    if "rdp_tunnel_v1" not in device.capabilities:
+        raise HTTPException(409, "Update the Jump agent to enable browser RDP.")
+    operation = latest_update(db, device_id)
+    if operation and operation.state in UPDATE_ACTIVE:
+        raise HTTPException(409, "Agent update in progress")
+    credential = db.get(Credential, body.credential_id)
+    if not credential or credential.device_id != device_id:
+        raise HTTPException(400, "Credential does not belong to this device")
+    if credential.kind != "windows_password":
+        raise HTTPException(400, "Unsupported RDP credential")
+    session = RemoteSession(
+        id=uuid.uuid4(),
+        device_id=device_id,
+        user_id=user.id,
+        credential_id=credential.id,
+        protocol="rdp",
+        columns=body.width,
+        rows=body.height,
+        dpi=body.dpi,
+    )
+    db.add(session)
+    db.commit()
+    return {
+        "id": session.id,
+        "state": session.state,
+        "created_at": session.created_at,
+        "dpi": body.dpi,
+    }
+
+
+@app.get("/api/internal/rdp-streams/{session_id}/authorize", dependencies=[Depends(internal)])
+def authorize_rdp_stream(
+    session_id: uuid.UUID,
+    device_id: uuid.UUID,
+    connection_id: str,
+    user_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    session = db.get(RemoteSession, session_id)
+    device = db.get(Device, device_id)
+    if (
+        not session
+        or session.protocol != "rdp"
+        or session.device_id != device_id
+        or session.user_id != user_id
+        or session.state != "connecting"
+        or not session.attached_at
+        or not device
+        or not device.online
+        or device.connection_id != connection_id
+        or device.os_family != "windows"
+        or "rdp_tunnel_v1" not in device.capabilities
+        or not device.agent_identity
+        or device.agent_identity.revoked_at
+    ):
+        raise HTTPException(403, "Session unauthorized")
+    return {"ok": True}
+
+
+def finish_remote_session(db: Session, session: RemoteSession, reason: str | None = None) -> None:
     if session.state in ("closed", "failed"):
         return
     was_active = session.state == "active"
     session.state = (
-        "closed" if was_active and reason in (None, "session_closed", "idle_timeout") else "failed"
+        "closed"
+        if was_active and reason in (None, "session_closed", "idle_timeout", "browser_disconnected")
+        else "failed"
     )
     session.closed_at = now()
     session.failure_reason = reason if session.state == "failed" else None
     db.add(
         AuditEvent(
-            event_type="ssh_session_ended" if session.state == "closed" else "ssh_session_failed",
+            event_type=f"{session.protocol}_session_ended"
+            if session.state == "closed"
+            else f"{session.protocol}_session_failed",
             actor_user_id=session.user_id,
             device_id=session.device_id,
             detail={
@@ -994,6 +1093,24 @@ def finish_ssh_session(db: Session, session: RemoteSession, reason: str | None =
         )
     )
     db.commit()
+
+
+def expire_pending_rdp(db: Session, device_id: uuid.UUID) -> None:
+    abandoned = db.scalars(
+        select(RemoteSession).where(
+            RemoteSession.device_id == device_id,
+            RemoteSession.protocol == "rdp",
+            RemoteSession.state == "connecting",
+            RemoteSession.attached_at.is_(None),
+            RemoteSession.created_at < now() - timedelta(seconds=60),
+        )
+    ).all()
+    for session in abandoned:
+        finish_remote_session(db, session, "session_expired")
+
+
+def finish_ssh_session(db: Session, session: RemoteSession, reason: str | None = None) -> None:
+    finish_remote_session(db, session, reason)
 
 
 def trust_ssh_host_key(db: Session, session: RemoteSession, fingerprint: str) -> bool:
@@ -1040,7 +1157,13 @@ async def browser_ssh_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
         return
     session = db.get(RemoteSession, session_id)
     user = db.get(User, uid)
-    if not user or not session or session.user_id != user.id or session.state != "connecting":
+    if (
+        not user
+        or not session
+        or session.protocol != "ssh"
+        or session.user_id != user.id
+        or session.state != "connecting"
+    ):
         await ws.close(code=1008)
         return
     created_at = (
@@ -1257,6 +1380,161 @@ async def browser_ssh_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
                     "message": SSH_ERRORS.get(reason, "Session disconnected"),
                 }
             )
+            await ws.close()
+        except (RuntimeError, WebSocketDisconnect, OSError):
+            pass
+
+
+RDP_ERRORS = {
+    "rdp_unavailable": "RDP is unavailable on this device. Check that Windows Remote Desktop is listening locally.",
+    "authentication_failed": "RDP authentication failed. Check the saved credential and NLA settings.",
+    "guacd_unavailable": "RDP protocol service unavailable.",
+    "session_timeout": "RDP connection timed out.",
+    "agent_disconnected": "Jump agent disconnected.",
+    "browser_disconnected": "Browser disconnected.",
+    "unsupported_agent": "Update the Jump agent to enable browser RDP.",
+    "unsupported_credential": "Unsupported RDP credential.",
+    "session_expired": "RDP session expired.",
+    "session_closed": "RDP session ended.",
+    "guacd_disconnected": "RDP protocol service disconnected.",
+    "service_restarted": "Jump service restarted.",
+}
+
+
+@app.websocket("/ws/rdp-sessions/{session_id}")
+async def browser_rdp_session(ws: WebSocket, session_id: uuid.UUID, db: Session = Depends(get_db)):
+    if ws.headers.get("origin") != cfg.public_url.rstrip("/"):
+        await ws.close(code=1008)
+        return
+    try:
+        uid = uuid.UUID(ws.session.get("uid", ""))
+    except ValueError:
+        await ws.close(code=1008)
+        return
+    session = db.get(RemoteSession, session_id)
+    user = db.get(User, uid)
+    if (
+        not user
+        or user.role != "admin"
+        or not session
+        or session.protocol != "rdp"
+        or session.user_id != uid
+        or session.state != "connecting"
+    ):
+        await ws.close(code=1008)
+        return
+    created = (
+        session.created_at.replace(tzinfo=UTC)
+        if session.created_at.tzinfo is None
+        else session.created_at
+    )
+    if created < now() - timedelta(seconds=60):
+        finish_remote_session(db, session, "session_expired")
+        await ws.close(code=1008)
+        return
+    claim = db.execute(
+        update(RemoteSession)
+        .where(
+            RemoteSession.id == session_id,
+            RemoteSession.protocol == "rdp",
+            RemoteSession.state == "connecting",
+            RemoteSession.attached_at.is_(None),
+        )
+        .values(attached_at=now())
+    )
+    db.commit()
+    if not claim.rowcount:
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+    reason = "agent_disconnected"
+    try:
+        device = db.get(Device, session.device_id)
+        credential = db.get(Credential, session.credential_id)
+        if (
+            not device
+            or not device.online
+            or not device.connection_id
+            or not device.agent_identity
+            or device.agent_identity.revoked_at
+        ):
+            raise RuntimeError("agent_disconnected")
+        if "rdp_tunnel_v1" not in device.capabilities:
+            raise RuntimeError("unsupported_agent")
+        if (
+            not credential
+            or credential.device_id != device.id
+            or credential.kind != "windows_password"
+        ):
+            raise RuntimeError("unsupported_credential")
+        secret = bytearray(decrypt_for_gateway(credential))
+
+        def started() -> None:
+            session.state, session.connected_at, session.last_activity_at = "active", now(), now()
+            db.add(
+                AuditEvent(
+                    event_type="rdp_session_started",
+                    actor_user_id=uid,
+                    device_id=device.id,
+                    detail={"session_id": str(session.id), "credential_id": str(credential.id)},
+                )
+            )
+            db.commit()
+
+        last_write = time.monotonic()
+
+        def activity() -> None:
+            nonlocal last_write
+            if time.monotonic() - last_write >= 30:
+                session.last_activity_at = now()
+                db.commit()
+                last_write = time.monotonic()
+
+        try:
+            reason = await rdp_gateway(
+                ws,
+                str(session.id),
+                str(device.id),
+                device.connection_id,
+                str(uid),
+                session.columns,
+                session.rows,
+                session.dpi,
+                credential.username,
+                credential.domain,
+                bytes(secret),
+                started,
+                activity,
+            )
+        finally:
+            secret[:] = b"\0" * len(secret)
+    except WebSocketDisconnect:
+        reason = "browser_disconnected"
+    except TimeoutError:
+        reason = "session_timeout"
+    except (OSError, ConnectionClosed):
+        reason = "agent_disconnected"
+    except (
+        RuntimeError,
+        ValueError,
+        TypeError,
+        KeyError,
+        UnicodeError,
+        json.JSONDecodeError,
+        binascii.Error,
+    ) as exc:
+        reason = str(exc) if str(exc) in RDP_ERRORS else "guacd_unavailable"
+    finally:
+        finish_remote_session(db, session, reason)
+        try:
+            if session.state == "closed":
+                await ws.send_text(instruction("disconnect").decode())
+            else:
+                await ws.send_text(
+                    instruction(
+                        "error", RDP_ERRORS.get(reason, "RDP session ended."), "519"
+                    ).decode()
+                )
             await ws.close()
         except (RuntimeError, WebSocketDisconnect, OSError):
             pass

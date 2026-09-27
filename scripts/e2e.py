@@ -152,6 +152,18 @@ def main():
                 for secret in secrets_map.values():
                     assert secret not in image_config + image_history, "secret baked into image"
             wait_until(lambda: urlopen("http://localhost:8000/health", timeout=3).status == 200)
+            # Confirm that the private guacd service has its RDP protocol
+            # handler available from the Jump container's network.
+            guacd_check = (
+                "import socket;"
+                "s=socket.create_connection(('guacd',4822),timeout=3);"
+                "s.settimeout(3);"
+                "s.sendall(b'6.select,3.rdp;');"
+                "reply=s.recv(512);"
+                "assert reply.startswith(b'4.args,'),reply[:40];"
+                "s.close()"
+            )
+            wait_until(lambda: dc("exec", "-T", "jump", "python", "-c", guacd_check) is not None)
             control_check = (
                 "import os,urllib.request;"
                 "r=urllib.request.Request("
@@ -168,7 +180,7 @@ def main():
                 "online": False,
                 "last_seen": None,
                 "revoked": False,
-                "revision": "0003",
+                "revision": "0004",
             }
 
             script = (

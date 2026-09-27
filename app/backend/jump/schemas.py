@@ -73,12 +73,20 @@ class AuditOutput(BaseModel):
 
 class CredentialInput(BaseModel):
     label: str = Field(min_length=1, max_length=255)
-    kind: Literal["linux_password", "linux_ssh_key"]
+    kind: Literal["linux_password", "linux_ssh_key", "windows_password"]
     username: str = Field(min_length=1, max_length=255)
     secret: str = Field(min_length=1, max_length=16384)
+    domain: str | None = Field(default=None, max_length=255)
 
 
 class SSHSessionInput(BaseModel):
     credential_id: uuid.UUID
     columns: int = Field(ge=20, le=500)
     rows: int = Field(ge=5, le=200)
+
+
+class RDPSessionInput(BaseModel):
+    credential_id: uuid.UUID
+    width: int = Field(ge=320, le=7680)
+    height: int = Field(ge=200, le=4320)
+    dpi: int = Field(default=96, ge=72, le=300)

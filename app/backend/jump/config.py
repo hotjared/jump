@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     public_url: str = "http://localhost:8000"
     agent_url: str = "http://localhost:8080"
     broker_internal_url: str = "http://broker:8081"
+    guacd_host: str = "guacd"
+    guacd_port: int = 4822
+    rdp_bridge_host: str = "jump"
     session_secret: str = ""
     broker_internal_token: str = ""
     jump_master_key: str = ""
