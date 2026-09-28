@@ -32,8 +32,8 @@
 .session-tab-close{background:none;border:0;color:#9ba1a8;font-size:19px;padding:4px 12px}
 .session-tab-close:hover{color:#fff}
 .session-dot,.session-state i{display:inline-block;width:7px;height:7px;min-width:7px;min-height:7px;border-radius:50%;background:#d5a762;flex:0 0 7px;align-self:center}
-.session-dot.connected,.session-state.connected i{background:#69c89b}
-.session-dot.disconnected,.session-dot.error,.session-state.disconnected i,.session-state.error i{background:#dc7777}
+.session-dot.state-connected,.session-state.state-connected i{background:#69c89b}
+.session-dot.state-disconnected,.session-dot.state-error,.session-state.state-disconnected i,.session-state.state-error i{background:#dc7777}
 .session-view{display:flex;flex:1;min-height:0;overflow:hidden;flex-direction:column;padding:18px 22px 0}
 .session-heading{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:0 2px 16px}
 .session-heading>div{display:flex;align-items:center;gap:16px;font-size:12px}

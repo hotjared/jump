@@ -212,12 +212,14 @@ describe('session workspace', () => {
     const socket = await connectDevice('docker01')
     const tab = screen.getByRole('tab', { name: /docker01/ })
     const panel = screen.getByRole('tabpanel', { name: /docker01/ })
-    expect(tab.querySelector('.session-dot.connected')).not.toBeNull()
-    expect(panel.querySelector('.session-state.connected i')).not.toBeNull()
+    expect(tab.querySelector('.session-dot.state-connected')).not.toBeNull()
+    expect(panel.querySelector('.session-state.state-connected i')).not.toBeNull()
 
     socket.emit({ type: 'status', state: 'closed', code: 'connection_error', message: 'Connection lost' })
-    await waitFor(() => expect(tab.querySelector('.session-dot.error')).not.toBeNull())
-    expect(panel.querySelector('.session-state.error i')).not.toBeNull()
+    await waitFor(() => expect(tab.querySelector('.session-dot.state-error')).not.toBeNull())
+    expect(panel.querySelector('.session-state.state-error i')).not.toBeNull()
+    expect(tab.querySelector('.session-dot.error')).toBeNull()
+    expect(panel.querySelector('.session-state.error')).toBeNull()
     expect(panel.querySelector('.session-error')?.textContent).toBe('Connection lost')
   })
 
