@@ -82,7 +82,9 @@ function SessionTerminal({ session, visible }: { session: SshSession; visible: b
     return () => cancelAnimationFrame(id)
   }, [session, visible])
 
-  return <div className="workspace-terminal" ref={node} aria-label={`${session.name} SSH terminal`} />
+  return <div className="workspace-terminal">
+    <div className="workspace-terminal-viewport" ref={node} aria-label={`${session.name} SSH terminal`} />
+  </div>
 }
 
 function SessionDesktop({ session, visible }: { session: RdpSession; visible: boolean }) {
