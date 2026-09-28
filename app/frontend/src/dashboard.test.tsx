@@ -45,6 +45,18 @@ describe('operational dashboard', () => {
     expect(document.body.textContent).not.toContain('secret-token')
   })
 
+  it('shows a failed outdated agent as one issue instead of duplicating update available', () => {
+    const failed = { ...base('docker01'), agent_update: { ...base('docker01').agent_update,
+      update_available: true,
+      update_state: { state: 'failed', failure_reason: 'reconnect_timeout', completed_at: new Date().toISOString() } } }
+    show([failed])
+    const issues = screen.getByRole('region', { name: 'Needs Attention' })
+    expect(within(issues).getByText('Agent update failed')).toBeTruthy()
+    expect(within(issues).queryByText('Agent update available')).toBeNull()
+    expect(document.querySelector('.dashboard-stats')?.textContent).toContain('Agent Updates1')
+    expect(document.querySelector('.dashboard-stats')?.textContent).toContain('Issues1')
+  })
+
   it('treats ordinary offline devices as normal and shows empty states', () => {
     show([{ ...base('offline'), online: false }])
     expect(screen.getByText('Nothing needs attention.')).toBeTruthy()
