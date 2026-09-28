@@ -1,0 +1,19 @@
+.dashboard{max-width:1050px}
+.dashboard .heading{margin-bottom:22px}
+.dashboard-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:18px}
+.dashboard-stats>div{background:#16181a;border:1px solid #2b2e31;border-radius:10px;padding:14px 16px}
+.dashboard-stats small{display:block;color:#969ba2;font-size:11px}
+.dashboard-stats strong{display:block;margin-top:5px;font-size:21px;font-weight:650}
+.dashboard-panel{margin-bottom:16px}
+.dashboard-panel h2{font-size:14px;margin:0;padding:16px 20px;border-bottom:1px solid #2b2d30}
+.dashboard-row{display:flex;align-items:center;gap:13px;min-height:60px;padding:12px 20px;border-bottom:1px solid #292b2e;font-size:12px}
+.dashboard-row:last-child{border-bottom:0}
+.dashboard-row-main{display:flex;align-items:center;flex-wrap:wrap;gap:5px 12px;min-width:0;flex:1;overflow-wrap:anywhere}
+.dashboard-row-main strong{font-weight:650}
+.dashboard-row-main span,.dashboard-row-main small{color:#a3a8ae}
+.dashboard-row-main small{flex-basis:100%;padding-left:0}
+.dashboard-issue-mark{display:grid;place-items:center;width:20px;height:20px;flex:none;border-radius:50%;background:#493c26;color:#e9bd74;font-weight:700}
+.dashboard-row time{color:#969ba2;flex:none;font-size:11px;text-align:right}
+.dashboard-row .button{padding:7px 12px}
+.dashboard-empty{padding:24px 20px;color:#969ba2;font-size:12px}
+@media(max-width:700px){.dashboard-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.dashboard-row{flex-wrap:wrap}.dashboard-row time{margin-left:auto}}

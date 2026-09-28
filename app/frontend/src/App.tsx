@@ -7,6 +7,7 @@ import { RdpSession } from './rdp-session'
 import type { WorkspaceSession } from './SessionWorkspace'
 import QuickConnect, { type QuickPreference } from './QuickConnect'
 import Notice, { type NoticeMessage } from './Notice'
+import Dashboard, { type DashboardEvent } from './Dashboard'
 const TerminalPanel = lazy(() => import('./TerminalPanel'))
 const RemotePanel = lazy(() => import('./RemotePanel'))
 const SessionWorkspace = lazy(() => import('./SessionWorkspace'))
@@ -22,7 +23,7 @@ type Device = {
   agent_update: UpdateInfo;
 }
 type User = { id: string; email: string; display_name: string; role: string; csrf: string }
-type Event = { id: string; event_type: string; created_at: string; device_id: string | null }
+type Event = DashboardEvent
 type Page = 'Dashboard' | 'Devices' | 'Support Links' | 'Audit Log' | 'Settings'
 const nav: { page: Page; icon: string }[] = [
   { page: 'Dashboard', icon: '◫' }, { page: 'Devices', icon: '▤' },
@@ -104,7 +105,6 @@ export default function App() {
   const visible = useMemo(() => filterDevices(devices, query, status, os, group, tag),
     [devices, query, status, os, group, tag])
   const device = devices.find(d => d.id === selected)
-  const online = devices.filter(d => d.online).length
   const activeSession = sessions.find(session => session.id === activeSessionId)
 
   function openSession(session: WorkspaceSession, { activate = true } = {}) {
@@ -177,9 +177,7 @@ export default function App() {
         {error && <div className="error" role="alert">{error}<button onClick={() => setError('')}>×</button></div>}
         <Notice notice={notice} dismiss={dismissNotice} />
         {page === 'Dashboard' && <>
-          <div className="heading"><div><p className="eyebrow">OVERVIEW</p><h1>Dashboard</h1><p>Device presence and recent activity at a glance.</p></div></div>
-          <div className="stats"><div className="stat"><small>TOTAL DEVICES</small><strong>{devices.length}</strong></div><div className="stat"><small>ONLINE</small><strong className="green">{online}</strong></div><div className="stat"><small>OFFLINE</small><strong>{devices.length - online}</strong></div></div>
-          <section className="panel"><div className="panel-title">Recent activity</div>{events.length ? events.slice(0, 8).map(e => <div className="activity" key={e.id}><span className="activity-mark" /><span>{e.event_type.replaceAll('_', ' ')}</span><time>{formatDate(e.created_at)}</time></div>) : <div className="empty">No recent activity to show.</div>}</section>
+          <Dashboard devices={devices} sessions={sessions} events={events} open={id => { setActiveSessionId(id); setSelected(null) }} />
         </>}
         {page === 'Devices' && <>
           <div className="heading"><div><p className="eyebrow">YOUR INFRASTRUCTURE</p><h1>Devices <span className="count">{devices.length}</span></h1><p>Enrolled endpoints and their current connection state.</p></div>
