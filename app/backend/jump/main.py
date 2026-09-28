@@ -26,7 +26,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -55,6 +55,7 @@ from .rdp import instruction, rdp_gateway
 from .releases import agent_downloads, newer_release, release_asset, release_number
 from .schemas import (
     CredentialInput,
+    CredentialUpdate,
     DevicePatch,
     EnrollmentInput,
     EnrollRequest,
@@ -65,7 +66,14 @@ from .schemas import (
     RDPSessionInput,
     SSHSessionInput,
 )
-from .security import consume_enrollment, create_enrollment, map_oidc_user, require_admin
+from .security import (
+    consume_enrollment,
+    create_enrollment,
+    encrypt_secret,
+    map_oidc_user,
+    master_key,
+    require_admin,
+)
 
 log = logging.getLogger("jump")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -1486,6 +1494,68 @@ def add_credential(
     except ValueError as exc:
         raise HTTPException(400, "Invalid credential") from exc
     return credential_output(item)
+
+
+@app.patch("/api/credentials/{credential_id}")
+def edit_credential(
+    credential_id: uuid.UUID,
+    body: CredentialUpdate,
+    user: User = Depends(admin),
+    db: Session = Depends(get_db),
+):
+    item = db.get(Credential, credential_id)
+    if item is None or item.user_id != user.id:
+        raise HTTPException(404)
+    if body.domain and item.kind != "windows_password":
+        raise HTTPException(400, "Domain is only supported for Windows credentials")
+    item.label = body.label
+    item.username = body.username
+    item.domain = body.domain if item.kind == "windows_password" else None
+    if body.secret:
+        secret = body.secret.encode()
+        if len(secret) > 16384:
+            raise HTTPException(400, "Credential is too large")
+        item.ciphertext, item.nonce, item.key_version = encrypt_secret(
+            secret, str(item.id), master_key()
+        )
+    db.add(
+        AuditEvent(
+            event_type="credential_updated",
+            actor_user_id=user.id,
+            detail={"credential_id": str(item.id), "kind": item.kind, "label": item.label},
+        )
+    )
+    db.commit()
+    return credential_output(item)
+
+
+@app.delete("/api/credentials/{credential_id}")
+def remove_credential(
+    credential_id: uuid.UUID,
+    user: User = Depends(admin),
+    db: Session = Depends(get_db),
+):
+    item = db.get(Credential, credential_id)
+    if item is None or item.user_id != user.id:
+        raise HTTPException(404)
+    db.execute(
+        delete(QuickConnectPreference).where(QuickConnectPreference.credential_id == item.id)
+    )
+    db.execute(
+        update(RemoteSession)
+        .where(RemoteSession.credential_id == item.id)
+        .values(credential_id=None)
+    )
+    db.add(
+        AuditEvent(
+            event_type="credential_deleted",
+            actor_user_id=user.id,
+            detail={"credential_id": str(item.id), "kind": item.kind, "label": item.label},
+        )
+    )
+    db.delete(item)
+    db.commit()
+    return {"ok": True}
 
 
 @app.post("/api/devices/{device_id}/ssh-host-key/reset")

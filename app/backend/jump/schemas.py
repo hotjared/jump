@@ -79,6 +79,14 @@ class CredentialInput(BaseModel):
     domain: str | None = Field(default=None, max_length=255)
 
 
+class CredentialUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    label: str = Field(min_length=1, max_length=255)
+    username: str = Field(min_length=1, max_length=255)
+    domain: str | None = Field(default=None, max_length=255)
+    secret: str | None = Field(default=None, max_length=16384)
+
+
 class SSHSessionInput(BaseModel):
     credential_id: uuid.UUID
     columns: int = Field(ge=20, le=500)
