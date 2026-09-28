@@ -46,7 +46,7 @@ export default function Dashboard({ devices, sessions, events, open }: {
     const state = d.agent_update?.update_state
     if (state?.state === 'failed') issues.push({ key: `update-failed-${d.id}`, title: 'Agent update failed',
       device: name, detail: reason(state.failure_reason) || undefined, date: state.completed_at || undefined })
-    if (d.agent_update?.update_available && d.identity_state === 'active') issues.push({
+    if (d.agent_update?.update_available && d.identity_state === 'active' && state?.state !== 'failed') issues.push({
       key: `update-${d.id}`, title: 'Agent update available', device: name,
       detail: `${d.agent_update.current_version || 'Unknown'} → ${d.agent_update.latest_version || 'Unknown'}`,
     })
