@@ -805,6 +805,14 @@ def me(request: Request, user: User = Depends(current_user)):
     }
 
 
+@app.get("/api/system-info")
+def system_info(user: User = Depends(current_user)):
+    return {
+        "server_version": cfg.jump_server_version,
+        "target_agent_version": cfg.jump_agent_version or None,
+    }
+
+
 @app.get("/api/devices")
 def devices(user: User = Depends(current_user), db: Session = Depends(get_db)):
     return [

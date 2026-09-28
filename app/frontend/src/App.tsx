@@ -23,6 +23,7 @@ type Device = {
   agent_update: UpdateInfo;
 }
 type User = { id: string; email: string; display_name: string; role: string; csrf: string }
+type SystemInfo = { server_version: string; target_agent_version: string | null }
 type Event = DashboardEvent
 type Page = 'Dashboard' | 'Devices' | 'Support Links' | 'Audit Log' | 'Settings'
 const nav: { page: Page; icon: string }[] = [
@@ -60,6 +61,8 @@ export default function App() {
   const [devices, setDevices] = useState<Device[]>([])
   const [groups, setGroups] = useState<Named[]>([])
   const [tags, setTags] = useState<Named[]>([])
+  const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null)
+  const [systemInfoError, setSystemInfoError] = useState(false)
   const [events, setEvents] = useState<Event[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [tab, setTab] = useState('Overview')
@@ -102,6 +105,14 @@ export default function App() {
     if (!enrolling || user?.role !== 'admin') return
     get<AgentDownloads>('/api/agent-downloads').then(setAgentRelease).catch(() => setError('Could not load agent downloads.'))
   }, [enrolling, user])
+  useEffect(() => {
+    if (page !== 'Settings' || !user) return
+    let active = true
+    get<SystemInfo>('/api/system-info')
+      .then(info => { if (active) { setSystemInfo(info); setSystemInfoError(false) } })
+      .catch(() => { if (active) setSystemInfoError(true) })
+    return () => { active = false }
+  }, [page, user])
   const visible = useMemo(() => filterDevices(devices, query, status, os, group, tag),
     [devices, query, status, os, group, tag])
   const device = devices.find(d => d.id === selected)
@@ -208,6 +219,10 @@ export default function App() {
             {user.role === 'admin' && <form onSubmit={e => { e.preventDefault(); action(async () => { await mutate('/api/groups', 'POST', { name: newGroup }); setNewGroup(''); await refresh(true) }) }}><input aria-label="New group" placeholder="Group name" value={newGroup} onChange={e => setNewGroup(e.target.value)} required /><button className="button">Add</button></form>}</section>
             <section className="panel settings-panel"><h2>Tags</h2><p>Use tags to filter across groups.</p>{tags.map(t => itemRow('tags', t))}
               {user.role === 'admin' && <form onSubmit={e => { e.preventDefault(); action(async () => { await mutate('/api/tags', 'POST', { name: newTag }); setNewTag(''); await refresh(true) }) }}><input aria-label="New tag" placeholder="Tag name" value={newTag} onChange={e => setNewTag(e.target.value)} required /><button className="button">Add</button></form>}</section></div>
+          <section className="panel settings-panel system-panel" aria-label="System"><h2>System</h2>
+            <div className="detail"><span>Jump version</span><strong>{systemInfoError ? 'Unavailable' : systemInfo?.server_version ?? 'Loading…'}</strong></div>
+            <div className="detail"><span>Target agent version</span><strong>{systemInfoError ? 'Unavailable' : systemInfo ? systemInfo.target_agent_version || 'Not configured' : 'Loading…'}</strong></div>
+          </section>
           <button className="button signout" onClick={() => action(async () => { await mutate('/api/logout', 'POST'); location.reload() })}>Sign out</button>
         </>}
         {page === 'Support Links' && <><div className="heading"><div><p className="eyebrow">COMING LATER</p><h1>{page}</h1></div></div><div className="placeholder"><span>◇</span><h2>{page} is coming in a later phase</h2><p>Open a Linux device and select Terminal to start SSH.</p></div></>}

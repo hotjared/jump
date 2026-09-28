@@ -66,6 +66,27 @@ def write_headers():
     return {"Origin": ORIGIN, "X-CSRF-Token": "test-csrf"}
 
 
+def test_system_info_is_authenticated_and_exposes_only_versions(client, db, monkeypatch):
+    assert client.get("/api/system-info").status_code == 401
+    as_user(client, db, Role.USER)
+    monkeypatch.setattr("jump.main.cfg.jump_server_version", "v0.1.6")
+    monkeypatch.setattr("jump.main.cfg.jump_agent_version", "v0.1.5")
+    monkeypatch.setattr("jump.main.cfg.oidc_client_secret", "should-never-appear")
+    response = client.get("/api/system-info")
+    assert response.status_code == 200
+    assert response.json() == {
+        "server_version": "v0.1.6",
+        "target_agent_version": "v0.1.5",
+    }
+    assert "should-never-appear" not in response.text
+
+    monkeypatch.setattr("jump.main.cfg.jump_agent_version", "")
+    assert client.get("/api/system-info").json() == {
+        "server_version": "v0.1.6",
+        "target_agent_version": None,
+    }
+
+
 def test_permissions_and_csrf(client, db):
     assert client.get("/api/devices").status_code == 401
     as_user(client, db, Role.USER)
