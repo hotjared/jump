@@ -104,6 +104,21 @@ async function connectDevice(id: string) {
 
 describe('session workspace', () => {
 
+  it('opens an existing session from Dashboard without creating or closing it', async () => {
+    render(<App />)
+    const socket = await connectDevice('docker01')
+    fireEvent.click(within(screen.getByRole('navigation')).getByRole('button', { name: /Dashboard$/ }))
+    const dashboard = screen.getByRole('region', { name: 'Active Sessions' })
+    expect(within(dashboard).getByText('docker01')).toBeTruthy()
+    expect(document.querySelector('.dashboard-stats')?.textContent).toContain('Active Sessions1')
+    const count = FakeSocket.instances.length
+    fireEvent.click(within(dashboard).getByRole('button', { name: 'Open docker01 SSH session' }))
+    expect(await screen.findByRole('tab', { name: /docker01/ })).toBeTruthy()
+    expect(FakeSocket.instances).toHaveLength(count)
+    expect(socket.readyState).toBe(1)
+    expect(socket.sent.some(message => JSON.parse(message).type === 'session_close')).toBe(false)
+  })
+
   it('lands on Devices, omits Sessions navigation, and retains the other pages', async () => {
     render(<App />)
     expect(await screen.findByRole('heading', { name: /Devices/ })).toBeTruthy()
