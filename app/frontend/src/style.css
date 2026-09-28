@@ -58,3 +58,5 @@
 .file-entry small { white-space: nowrap; }
 .files-selection, .file-transfer { display: flex; flex-direction: column; align-items: flex-start; gap: .45rem; padding: .75rem; border: 1px solid #4448; border-radius: 6px; overflow-wrap: anywhere; }
 .file-transfer progress { width: 100%; }
+
+.system-panel{margin-top:18px;max-width:740px}.system-panel .detail:last-child{border-bottom:0;padding-bottom:0}
