@@ -43,7 +43,7 @@ def seeded(db):
 
 def credential(client, db, device):
     response = client.post(
-        f"/api/devices/{device.id}/credentials",
+        "/api/credentials",
         headers=write_headers(),
         json={
             "label": "Root",
@@ -71,14 +71,14 @@ def create(client, device, cred):
 
 def test_session_authorization_validation_and_host_trust(client, db):
     device = seeded(db)
-    assert client.get(f"/api/devices/{device.id}/credentials").status_code == 401
+    assert client.get("/api/credentials").status_code == 401
     assert create(client, device, str(uuid.uuid4())).status_code == 403  # CSRF guard
     user = as_user(client, db)
     cred = credential(client, db, device)
     other = seeded(db)
-    assert create(client, other, cred).status_code == 400
+    assert create(client, other, cred).status_code == 201
     wrong_kind = Credential(
-        device_id=device.id,
+        user_id=user.id,
         label="Windows only",
         kind="windows_password",
         username="root",
@@ -153,7 +153,7 @@ def test_older_agent_cannot_create_or_attach_browser_ssh(client, db, monkeypatch
 def test_credential_creation_requires_admin_and_never_reads_back_secret(client, db):
     device = seeded(db)
     user = as_user(client, db, Role.USER)
-    path = f"/api/devices/{device.id}/credentials"
+    path = "/api/credentials"
     payload = {
         "label": "Deploy key",
         "username": "deploy",

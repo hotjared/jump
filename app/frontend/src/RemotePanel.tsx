@@ -10,17 +10,13 @@ export default function RemotePanel({ device, admin, mutate, existing, onConnect
 }) {
   const [credentials, setCredentials] = useState<Credential[]>([])
   const [selected, setSelected] = useState('')
-  const [label, setLabel] = useState('')
-  const [username, setUsername] = useState('')
-  const [domain, setDomain] = useState('')
-  const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
     if (!admin || device.os_family !== 'windows') return
     let mounted = true
-    fetch(`/api/devices/${device.id}/credentials`, { credentials: 'same-origin' })
+    fetch(`/api/credentials`, { credentials: 'same-origin' })
       .then(r => { if (!r.ok) throw new Error('Could not load credentials'); return r.json() as Promise<Credential[]> })
       .then(items => { if (mounted) setCredentials(items.filter(c => c.kind === 'windows_password')) })
       .catch(e => { if (mounted) setError(e.message) })
@@ -48,17 +44,6 @@ export default function RemotePanel({ device, admin, mutate, existing, onConnect
     finally { setBusy(false) }
   }
 
-  async function saveCredential(event: React.FormEvent) {
-    event.preventDefault(); setBusy(true); setError('')
-    try {
-      const item = await mutate<Credential>(`/api/devices/${device.id}/credentials`, 'POST', {
-        kind: 'windows_password', label, username, domain: domain || null, secret: password,
-      })
-      setCredentials(previous => [...previous, item]); setSelected(item.id)
-      setLabel(''); setUsername(''); setDomain(''); setPassword('')
-    } catch (e) { setError(e instanceof Error ? e.message : 'Could not save credential') }
-    finally { setBusy(false) }
-  }
 
   return <div className="terminal-panel">
     <p className="muted">RDP through the connected Jump agent to Windows localhost:3389. Enable Remote Desktop on the device first.</p>
@@ -66,15 +51,8 @@ export default function RemotePanel({ device, admin, mutate, existing, onConnect
     <div className="terminal-controls"><select aria-label="Windows credential" value={selected} onChange={e => setSelected(e.target.value)}>
       <option value="">Choose Windows credential</option>{credentials.map(c => <option key={c.id} value={c.id}>{c.label} ({c.domain ? `${c.domain}\\` : ''}{c.username})</option>)}
     </select><button className="button primary" disabled={!device.online || !selected || busy} onClick={connect}>Connect</button></div>
-    {!credentials.length && <p>No Windows credential saved for this device.</p>}
+    {!credentials.length && <p>No Windows credentials saved. Add one under Credentials.</p>}
     {error && <p className="error" role="alert">{error}</p>}
-    <form className="ssh-credential-form" onSubmit={saveCredential}>
-      <h3>Add Windows credential</h3>
-      <input aria-label="Credential label" placeholder="Label" value={label} onChange={e => setLabel(e.target.value)} required />
-      <input aria-label="Windows username" placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} required />
-      <input aria-label="Windows domain" placeholder="Domain (optional)" value={domain} onChange={e => setDomain(e.target.value)} />
-      <input aria-label="Windows password" type="password" autoComplete="new-password" value={password} onChange={e => setPassword(e.target.value)} required />
-      <button className="button" disabled={busy}>Save credential</button>
-    </form>
+
   </div>
 }

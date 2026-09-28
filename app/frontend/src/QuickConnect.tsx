@@ -43,7 +43,7 @@ export default function QuickConnect({ device, preferences, mutate, onPreference
   const name = device.display_name || device.hostname
 
   async function loadCredentials(): Promise<Credential[]> {
-    const response = await fetch(`/api/devices/${device.id}/credentials`, { credentials: 'same-origin' })
+    const response = await fetch('/api/credentials', { credentials: 'same-origin' })
     if (!response.ok) throw new Error('Could not load credentials')
     return response.json() as Promise<Credential[]>
   }
@@ -118,7 +118,7 @@ export default function QuickConnect({ device, preferences, mutate, onPreference
       <label>Credential<select aria-label="Quick Connect credential" value={credentialId} onChange={event => setCredentialId(event.target.value)}>
         <option value="">Choose credential</option>{credentials.filter(c => compatible(c, protocol)).map(c => <option key={c.id} value={c.id}>{c.label} ({c.username})</option>)}
       </select></label>
-      {!credentials.some(c => compatible(c, protocol)) && <p>No saved credential for this connection. Add one in Device Details.</p>}
+      {!credentials.some(c => compatible(c, protocol)) && <p>No saved credential for this connection. Add one under Credentials.</p>}
       <label className="quick-remember"><input type="checkbox" checked={remember} onChange={event => setRemember(event.target.checked)} /> Use this for Quick Connect</label>
       <button className="button primary" disabled={pending || !credentialId}>{pending ? 'Connecting…' : 'Connect'}</button>
     </form></div>}

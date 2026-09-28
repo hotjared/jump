@@ -18,14 +18,14 @@ def client(db):
     app.dependency_overrides.clear()
 
 
-def seed(db, os_family="windows", kind="windows_password"):
+def seed(db, user, os_family="windows", kind="windows_password"):
     device = Device(
         hostname="host", os_family=os_family, capabilities=["rdp_tunnel_v1", "ssh_terminal_v1"]
     )
     db.add(device)
     db.flush()
     credential = Credential(
-        device_id=device.id,
+        user_id=user.id,
         label="admin",
         kind=kind,
         username="user",
@@ -46,9 +46,9 @@ def put(client, device, credential, protocol="rdp"):
 
 
 def test_user_scope_validation_and_update(client, db):
-    device, credential = seed(db)
-    assert client.get("/api/quick-connect-preferences").status_code == 401
     user = as_user(client, db, Role.USER)
+    device, credential = seed(db, user)
+    assert client.get("/api/quick-connect-preferences").status_code == 403
     assert put(client, device, credential).status_code == 403
     user.role = Role.ADMIN
     db.commit()
@@ -67,13 +67,13 @@ def test_user_scope_validation_and_update(client, db):
 
     other = as_user(client, db)
     assert client.get("/api/quick-connect-preferences").json() == []
-    assert put(client, device, credential).status_code == 200
+    assert put(client, device, credential).status_code == 400
     assert (
         db.get(QuickConnectPreference, (user.id, device.id, "rdp")).credential_id == credential.id
     )
-    assert db.get(QuickConnectPreference, (other.id, device.id, "rdp")) is not None
-    alien_device, alien_credential = seed(db)
-    assert put(client, device, alien_credential).status_code == 400
+    assert db.get(QuickConnectPreference, (other.id, device.id, "rdp")) is None
+    alien_device, alien_credential = seed(db, other)
+    assert put(client, device, alien_credential).status_code == 200
     assert put(client, alien_device, credential).status_code == 400
     assert (
         client.put(
@@ -86,16 +86,16 @@ def test_user_scope_validation_and_update(client, db):
 
 
 def test_type_os_and_stale_credential(client, db):
-    as_user(client, db)
-    windows, password = seed(db)
-    linux, ssh_key = seed(db, "linux", "linux_ssh_key")
+    user = as_user(client, db)
+    windows, password = seed(db, user)
+    linux, ssh_key = seed(db, user, "linux", "linux_ssh_key")
     assert put(client, windows, password, "ssh").status_code == 400
     assert put(client, linux, ssh_key, "rdp").status_code == 400
     assert put(client, linux, ssh_key, "ssh").status_code == 200
     assert put(client, windows, ssh_key).status_code == 400
     assert put(client, linux, password, "ssh").status_code == 400
     wrong = Credential(
-        device_id=windows.id,
+        user_id=user.id,
         label="wrong",
         kind="linux_password",
         username="user",
@@ -114,12 +114,12 @@ def test_type_os_and_stale_credential(client, db):
 
 def test_deleting_device_and_user_cleans_preferences(client, db):
     user = as_user(client, db)
-    device, credential = seed(db)
+    device, credential = seed(db, user)
     assert put(client, device, credential).status_code == 200
     db.delete(device)
     db.commit()
     assert db.scalars(select(QuickConnectPreference)).all() == []
-    next_device, next_credential = seed(db)
+    next_device, next_credential = seed(db, user)
     assert put(client, next_device, next_credential).status_code == 200
     db.delete(user)
     db.commit()

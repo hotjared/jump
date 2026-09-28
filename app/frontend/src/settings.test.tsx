@@ -20,6 +20,7 @@ async function openSettings(targetAgentVersion: string | null) {
   })
   vi.stubGlobal('fetch', fetchMock)
   render(<App />)
+  expect(await screen.findByRole('button', { name: /Credentials/ })).toBeTruthy()
   fireEvent.click(await screen.findByRole('button', { name: /Settings/ }))
   return fetchMock
 }

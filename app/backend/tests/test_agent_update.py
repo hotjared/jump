@@ -121,7 +121,7 @@ def test_update_authorization_conflicts_and_lifecycle(client, db, monkeypatch):
     from jump.models import Credential
 
     cred = Credential(
-        device_id=device.id,
+        user_id=user.id,
         label="SSH",
         kind="linux_password",
         username="root",

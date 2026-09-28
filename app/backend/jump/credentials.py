@@ -2,12 +2,11 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from .models import AuditEvent, Credential, Device, User
+from .models import AuditEvent, Credential, User
 from .security import decrypt_secret, encrypt_secret, master_key
 
 KINDS = {
     "windows_password",
-    "windows_domain_password",
     "linux_password",
     "linux_ssh_key",
 }
@@ -16,7 +15,6 @@ KINDS = {
 def create_credential(
     db: Session,
     actor: User,
-    device: Device,
     *,
     label: str,
     kind: str,
@@ -26,11 +24,11 @@ def create_credential(
 ) -> Credential:
     if kind not in KINDS or not label or not username or not secret:
         raise ValueError("Invalid credential metadata")
-    if domain and kind not in {"windows_password", "windows_domain_password"}:
+    if domain and kind != "windows_password":
         raise ValueError("Domain is only supported for Windows credentials")
     item = Credential(
         id=uuid.uuid4(),
-        device_id=device.id,
+        user_id=actor.id,
         label=label,
         kind=kind,
         username=username,
@@ -43,7 +41,13 @@ def create_credential(
         secret, str(item.id), master_key()
     )
     db.add(item)
-    db.add(AuditEvent(event_type="credential_created", actor_user_id=actor.id, device_id=device.id))
+    db.add(
+        AuditEvent(
+            event_type="credential_created",
+            actor_user_id=actor.id,
+            detail={"credential_id": str(item.id)},
+        )
+    )
     db.commit()
     return item
 
