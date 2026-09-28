@@ -83,9 +83,6 @@ class Device(Base):
     agent_identity: Mapped["AgentIdentity | None"] = relationship(
         "AgentIdentity", uselist=False, cascade="all, delete-orphan", passive_deletes=True
     )
-    credentials: Mapped[list["Credential"]] = relationship(
-        "Credential", cascade="all, delete-orphan", passive_deletes=True
-    )
     online: Mapped[bool] = mapped_column(Boolean, default=False)
     ssh_host_key: Mapped[str | None] = mapped_column(String(128))
     connection_id: Mapped[str | None] = mapped_column(String(36))
@@ -123,7 +120,7 @@ class AgentIdentity(Base):
 class Credential(Base):
     __tablename__ = "credentials"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    device_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"))
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     label: Mapped[str] = mapped_column(String(255))
     kind: Mapped[str] = mapped_column(String(32))
     username: Mapped[str] = mapped_column(String(255))
@@ -134,7 +131,7 @@ class Credential(Base):
     default_for: Mapped[str | None] = mapped_column(String(16))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
-    __table_args__ = (Index("ix_credentials_device", "device_id"),)
+    __table_args__ = (Index("ix_credentials_user", "user_id"),)
 
 
 class QuickConnectPreference(Base):
@@ -157,8 +154,8 @@ class RemoteSession(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     device_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"))
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    credential_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("credentials.id", ondelete="CASCADE")
+    credential_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("credentials.id", ondelete="SET NULL"), nullable=True
     )
     state: Mapped[str] = mapped_column(String(16), default="connecting")
     protocol: Mapped[str] = mapped_column(String(16), default="ssh")

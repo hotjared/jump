@@ -89,7 +89,6 @@ def test_credential_service_never_stores_plaintext(db):
     item = create_credential(
         db,
         admin,
-        device,
         label="Emergency",
         kind="linux_ssh_key",
         username="root",

@@ -323,7 +323,7 @@ def test_revoked_offline_device_delete_cascades_owned_data_and_preserves_shared_
     db.flush()
     identity = AgentIdentity(device_id=device.id, public_key=b"k" * 32, revoked_at=now())
     credential = Credential(
-        device_id=device.id,
+        user_id=user.id,
         label="Local admin",
         kind="password",
         username="administrator",
@@ -343,7 +343,7 @@ def test_revoked_offline_device_delete_cascades_owned_data_and_preserves_shared_
     db.expire_all()
     assert db.get(Device, device_id) is None
     assert db.scalar(select(AgentIdentity).where(AgentIdentity.device_id == device_id)) is None
-    assert db.scalar(select(Credential).where(Credential.device_id == device_id)) is None
+    assert db.get(Credential, credential.id) is not None
     assert db.get(Group, group.id) is not None
     assert db.get(Tag, tag.id) is not None
     assert (

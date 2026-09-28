@@ -1403,7 +1403,7 @@ def quick_connect_preferences(user: User = Depends(admin), db: Session = Depends
             "preferred": preference.preferred,
         }
         for preference, credential in rows
-        if credential.device_id == preference.device_id
+        if credential.user_id == user.id
         and credential.kind
         in ({"rdp": {"windows_password"}, "ssh": SSH_KINDS}.get(preference.protocol, set()))
     ]
@@ -1427,7 +1427,7 @@ def save_quick_connect_preference(
     if device.os_family != required_os or capability not in device.capabilities:
         raise HTTPException(400, "Device does not support this connection")
     credential = db.get(Credential, body.credential_id)
-    if not credential or credential.device_id != device_id or credential.kind not in kinds:
+    if not credential or credential.user_id != user.id or credential.kind not in kinds:
         raise HTTPException(400, "Choose a compatible credential for this device")
     key = (user.id, device_id, body.protocol)
     preference = db.get(QuickConnectPreference, key)
@@ -1456,32 +1456,20 @@ def save_quick_connect_preference(
     }
 
 
-@app.get("/api/devices/{device_id}/credentials")
-def list_credentials(
-    device_id: uuid.UUID, user: User = Depends(admin), db: Session = Depends(get_db)
-):
-    if not db.get(Device, device_id):
-        raise HTTPException(404)
+@app.get("/api/credentials")
+def list_credentials(user: User = Depends(admin), db: Session = Depends(get_db)):
     return [
         credential_output(c)
-        for c in db.scalars(select(Credential).where(Credential.device_id == device_id)).all()
+        for c in db.scalars(select(Credential).where(Credential.user_id == user.id)).all()
     ]
 
 
-@app.post("/api/devices/{device_id}/credentials", status_code=201)
+@app.post("/api/credentials", status_code=201)
 def add_credential(
-    device_id: uuid.UUID,
     body: CredentialInput,
     user: User = Depends(admin),
     db: Session = Depends(get_db),
 ):
-    device = db.get(Device, device_id)
-    if not device:
-        raise HTTPException(404)
-    if (device.os_family == "linux" and body.kind not in SSH_KINDS) or (
-        device.os_family == "windows" and body.kind != "windows_password"
-    ):
-        raise HTTPException(400, "Credential kind does not match the device")
     secret_bytes = body.secret.encode()
     if len(secret_bytes) > 16384:
         raise HTTPException(400, "Credential is too large")
@@ -1489,7 +1477,6 @@ def add_credential(
         item = create_credential(
             db,
             user,
-            device,
             label=body.label,
             kind=body.kind,
             username=body.username,
@@ -1555,8 +1542,8 @@ def new_ssh_session(
     if "ssh_terminal_v1" not in device.capabilities:
         raise HTTPException(409, "Update the Jump agent to enable browser SSH")
     credential = db.get(Credential, body.credential_id)
-    if not credential or credential.device_id != device_id:
-        raise HTTPException(400, "Credential does not belong to this device")
+    if not credential or credential.user_id != user.id:
+        raise HTTPException(400, "Credential is unavailable")
     if credential.kind not in SSH_KINDS:
         raise HTTPException(400, "Unsupported SSH credential")
     session = RemoteSession(
@@ -1595,8 +1582,8 @@ def new_rdp_session(
     if operation and operation.state in UPDATE_ACTIVE:
         raise HTTPException(409, "Agent update in progress")
     credential = db.get(Credential, body.credential_id)
-    if not credential or credential.device_id != device_id:
-        raise HTTPException(400, "Credential does not belong to this device")
+    if not credential or credential.user_id != user.id:
+        raise HTTPException(400, "Credential is unavailable")
     if credential.kind != "windows_password":
         raise HTTPException(400, "Unsupported RDP credential")
     session = RemoteSession(
@@ -1782,6 +1769,8 @@ async def browser_ssh_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
             or not device.agent_identity
             or device.agent_identity.revoked_at
             or not credential
+            or credential.user_id != uid
+            or credential.kind not in SSH_KINDS
         ):
             raise RuntimeError("device_disconnected")
         if "ssh_terminal_v1" not in device.capabilities:
@@ -2045,11 +2034,7 @@ async def browser_rdp_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
             raise RuntimeError("agent_disconnected")
         if "rdp_tunnel_v1" not in device.capabilities:
             raise RuntimeError("unsupported_agent")
-        if (
-            not credential
-            or credential.device_id != device.id
-            or credential.kind != "windows_password"
-        ):
+        if not credential or credential.user_id != uid or credential.kind != "windows_password":
             raise RuntimeError("unsupported_credential")
         secret = bytearray(decrypt_for_gateway(credential))
 

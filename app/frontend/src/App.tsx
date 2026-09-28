@@ -12,6 +12,7 @@ const TerminalPanel = lazy(() => import('./TerminalPanel'))
 const RemotePanel = lazy(() => import('./RemotePanel'))
 const SessionWorkspace = lazy(() => import('./SessionWorkspace'))
 const FilesPanel = lazy(() => import('./FilesPanel'))
+const CredentialsPage = lazy(() => import('./CredentialsPage'))
 
 type Named = { id: string; name: string }
 type Device = {
@@ -25,9 +26,10 @@ type Device = {
 type User = { id: string; email: string; display_name: string; role: string; csrf: string }
 type SystemInfo = { server_version: string; target_agent_version: string | null }
 type Event = DashboardEvent
-type Page = 'Dashboard' | 'Devices' | 'Support Links' | 'Audit Log' | 'Settings'
+type Page = 'Dashboard' | 'Devices' | 'Credentials' | 'Support Links' | 'Audit Log' | 'Settings'
 const nav: { page: Page; icon: string }[] = [
   { page: 'Dashboard', icon: '◫' }, { page: 'Devices', icon: '▤' },
+  { page: 'Credentials', icon: '◇' },
   { page: 'Support Links', icon: '↗' }, { page: 'Audit Log', icon: '≡' },
   { page: 'Settings', icon: '⚙' },
 ]
@@ -213,6 +215,7 @@ export default function App() {
             {!visible.length && <div className="empty">{devices.length ? 'No devices match these filters.' : 'No devices yet. Enroll your first Windows or Linux server.'}</div>}
           </section>
         </>}
+        {page === 'Credentials' && <Suspense fallback={null}><CredentialsPage admin={user.role === 'admin'} mutate={mutate} /></Suspense>}
         {page === 'Audit Log' && <><div className="heading"><div><p className="eyebrow">SECURITY</p><h1>Audit Log</h1><p>Recent activity in your Jump deployment.</p></div></div><section className="panel">{user.role === 'admin' ? events.map(e => <div className="activity" key={e.id}><span className="activity-mark" /><span>{e.event_type.replaceAll('_', ' ')}</span><time>{formatDate(e.created_at)}</time></div>) : <div className="empty">Admin access required.</div>}</section></>}
         {page === 'Settings' && <><div className="heading"><div><p className="eyebrow">ORGANIZE</p><h1>Settings</h1><p>Groups and tags for a single environment.</p></div></div>
           <div className="settings-grid"><section className="panel settings-panel"><h2>Groups</h2><p>Each device can belong to one group.</p>{groups.map(g => itemRow('groups', g))}

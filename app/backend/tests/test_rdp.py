@@ -49,7 +49,7 @@ def seed(db, os_family="windows", capabilities=None):
 
 def credential(client, device):
     response = client.post(
-        f"/api/devices/{device.id}/credentials",
+        "/api/credentials",
         headers=write_headers(),
         json={
             "label": "Admin",
@@ -74,7 +74,7 @@ def create(client, device, cred):
 
 def test_rdp_authorization_capability_credential_and_lifecycle(client, db):
     device = seed(db)
-    assert client.get(f"/api/devices/{device.id}/credentials").status_code == 401
+    assert client.get("/api/credentials").status_code == 401
     assert (
         client.post(
             f"/api/devices/{device.id}/rdp-sessions", headers=write_headers(), json={}
@@ -89,9 +89,9 @@ def test_rdp_authorization_capability_credential_and_lifecycle(client, db):
     cred = credential(client, device)
     stored = db.get(Credential, uuid.UUID(cred))
     assert stored.domain == "EXAMPLE" and b"do-not-expose-me" not in stored.ciphertext
-    assert "do-not-expose-me" not in client.get(f"/api/devices/{device.id}/credentials").text
+    assert "do-not-expose-me" not in client.get("/api/credentials").text
     other = seed(db)
-    assert create(client, other, cred).status_code == 400
+    assert create(client, other, cred).status_code == 201
     linux = seed(db, "linux")
     assert create(client, linux, cred).status_code == 409
     device.capabilities = ["rdp"]
@@ -101,7 +101,7 @@ def test_rdp_authorization_capability_credential_and_lifecycle(client, db):
         denied.status_code == 409
         and denied.json()["detail"] == "Update the Jump agent to enable browser RDP."
     )
-    assert db.scalar(select(RemoteSession)) is None
+    assert db.scalar(select(RemoteSession).where(RemoteSession.device_id == device.id)) is None
     device.capabilities = ["rdp", "rdp_tunnel_v1"]
     device.online = False
     db.commit()
@@ -112,7 +112,7 @@ def test_rdp_authorization_capability_credential_and_lifecycle(client, db):
     assert create(client, device, cred).status_code == 409
     device.agent_identity.revoked_at = None
     wrong = Credential(
-        device_id=device.id,
+        user_id=user.id,
         label="key",
         kind="linux_ssh_key",
         username="admin",

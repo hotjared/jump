@@ -12,17 +12,13 @@ export default function TerminalPanel({ device, admin, mutate, existing, onConne
   const [selected, setSelected] = useState('')
   const [status, setStatus] = useState('Disconnected')
   const [fingerprint, setFingerprint] = useState(device.ssh_host_key)
-  const [kind, setKind] = useState<'linux_password' | 'linux_ssh_key'>('linux_password')
-  const [label, setLabel] = useState('')
-  const [username, setUsername] = useState('')
-  const [secret, setSecret] = useState('')
   const [error, setError] = useState('')
   const pending = useRef<SshSession | null>(null)
   const mounted = useRef(true)
 
   useEffect(() => {
     mounted.current = true
-    if (admin) fetch(`/api/devices/${device.id}/credentials`, { credentials: 'same-origin' })
+    if (admin) fetch(`/api/credentials`, { credentials: 'same-origin' })
       .then(r => { if (!r.ok) throw new Error('Could not load credentials'); return r.json() as Promise<Credential[]> })
       .then(items => { if (mounted.current) setCredentials(items.filter(item => ['linux_password', 'linux_ssh_key'].includes(item.kind))) })
       .catch(e => { if (mounted.current) setError(e.message) })
@@ -48,14 +44,6 @@ export default function TerminalPanel({ device, admin, mutate, existing, onConne
     }
   }
 
-  async function saveCredential(event: React.FormEvent) {
-    event.preventDefault(); setError('')
-    try {
-      const item = await mutate<Credential>(`/api/devices/${device.id}/credentials`, 'POST', { label, kind, username, secret })
-      setCredentials(previous => [...previous, item]); setSelected(item.id)
-      setLabel(''); setUsername(''); setSecret('')
-    } catch (e) { setError(e instanceof Error ? e.message : 'Could not save credential') }
-  }
 
   if (device.os_family !== 'linux')
     return <div className="placeholder compact"><h2>Terminal unavailable</h2><p>This agent does not advertise Linux SSH support.</p></div>
@@ -82,17 +70,9 @@ export default function TerminalPanel({ device, admin, mutate, existing, onConne
       </select>
       <button className="button primary" disabled={!device.online || !selected || status === 'Connecting'} onClick={connect}>Connect</button>
     </div>
-    {!credentials.length && <p>No SSH credential saved for this device.</p>}
+    {!credentials.length && <p>No SSH credentials saved. Add one under Credentials.</p>}
     {error && <p className="error" role="alert">{error}</p>}
     <p role="status">{status}</p>
-    <form className="ssh-credential-form" onSubmit={saveCredential}>
-      <h3>Add SSH credential</h3>
-      <input aria-label="Credential label" placeholder="Label" value={label} onChange={e => setLabel(e.target.value)} required />
-      <input aria-label="SSH username" placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} required />
-      <select aria-label="Authentication type" value={kind} onChange={e => setKind(e.target.value as typeof kind)}><option value="linux_password">Password</option><option value="linux_ssh_key">Private key</option></select>
-      {kind === 'linux_password' ? <input aria-label="SSH password" type="password" autoComplete="new-password" value={secret} onChange={e => setSecret(e.target.value)} required />
-        : <textarea aria-label="SSH private key" placeholder="Paste private key" value={secret} onChange={e => setSecret(e.target.value)} required />}
-      <button className="button">Save credential</button>
-    </form>
+
   </div>
 }

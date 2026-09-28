@@ -181,7 +181,7 @@ def main():
                 "online": False,
                 "last_seen": None,
                 "revoked": False,
-                "revision": "0006",
+                "revision": "0007",
             }
 
             script = (
@@ -245,8 +245,13 @@ def main():
             listing = Request(
                 f"{file_base}?{urlencode({'path': str(file_dir)})}", headers=browser_headers
             )
-            with urlopen(listing, timeout=10) as response:
-                assert json.load(response)["entries"] == []
+
+            # Presence can return before the agent file stream is ready after broker restart.
+            def listing_ready():
+                with urlopen(listing, timeout=10) as response:
+                    return json.load(response)["entries"] == []
+
+            wait_until(listing_ready, timeout=45)
             payload = b"Jump agent file round trip\n" * 2000
             upload_query = urlencode(
                 {"path": str(file_dir), "filename": "round-trip.bin", "size": len(payload)}
