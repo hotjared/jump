@@ -207,6 +207,20 @@ describe('session workspace', () => {
     expect(resizeFrames().at(-1)).toMatchObject({ columns: 80, rows: 31 })
   })
 
+  it('keeps fixed status indicators on the tab and heading when a session errors', async () => {
+    render(<App />)
+    const socket = await connectDevice('docker01')
+    const tab = screen.getByRole('tab', { name: /docker01/ })
+    const panel = screen.getByRole('tabpanel', { name: /docker01/ })
+    expect(tab.querySelector('.session-dot.connected')).not.toBeNull()
+    expect(panel.querySelector('.session-state.connected i')).not.toBeNull()
+
+    socket.emit({ type: 'status', state: 'closed', code: 'connection_error', message: 'Connection lost' })
+    await waitFor(() => expect(tab.querySelector('.session-dot.error')).not.toBeNull())
+    expect(panel.querySelector('.session-state.error i')).not.toBeNull()
+    expect(panel.querySelector('.session-error')?.textContent).toBe('Connection lost')
+  })
+
   it('moves a connected terminal from the drawer into a large persistent tab, preserves two buffers through navigation, and disconnects on close', async () => {
     render(<App />)
     const first = await connectDevice('docker01')

@@ -31,7 +31,7 @@
 .session-tab small{color:#9aa0a6;font-size:10px}
 .session-tab-close{background:none;border:0;color:#9ba1a8;font-size:19px;padding:4px 12px}
 .session-tab-close:hover{color:#fff}
-.session-dot,.session-state i{display:inline-block;width:7px;height:7px;border-radius:50%;background:#d5a762;flex-shrink:0}
+.session-dot,.session-state i{display:inline-block;width:7px;height:7px;min-width:7px;min-height:7px;border-radius:50%;background:#d5a762;flex:0 0 7px;align-self:center}
 .session-dot.connected,.session-state.connected i{background:#69c89b}
 .session-dot.disconnected,.session-dot.error,.session-state.disconnected i,.session-state.error i{background:#dc7777}
 .session-view{display:flex;flex:1;min-height:0;overflow:hidden;flex-direction:column;padding:18px 22px 0}
@@ -40,8 +40,9 @@
 .session-heading strong{font-size:16px}
 .session-state{display:inline-flex;align-items:center;gap:7px;text-transform:capitalize;color:#aaa;font-size:11px}
 .session-error{color:#e39999;font-size:12px}
-.workspace-terminal{flex:1;min-height:0;min-width:0;overflow:hidden;background:#111318;padding:12px;border:1px solid #303337;border-radius:8px 8px 0 0}
-.workspace-terminal .xterm{height:100%}
+.workspace-terminal{flex:1;min-height:0;min-width:0;overflow:hidden;background:#111318;padding:0 12px;border:1px solid #303337;border-radius:8px 8px 0 0}
+/* FitAddon subtracts xterm padding when counting rows, but not padding on its parent. */
+.workspace-terminal .xterm{height:100%;padding:12px 0 28px}
 .session-footer{color:#858c93;padding:11px 4px;font-size:11px}
 .session-tab button:focus-visible,.session-heading button:focus-visible{outline:2px solid #dce5ed;outline-offset:2px}
 .workspace-desktop{flex:1;min-height:0;min-width:0;overflow:hidden;background:#111318;border:1px solid #303337;border-radius:8px 8px 0 0;display:flex;align-items:center;justify-content:center}
@@ -63,3 +64,10 @@
 
 .credential-inventory{width:100%}.credential-header,.credential-row{display:grid;grid-template-columns:minmax(140px,2fr) minmax(130px,1.3fr) minmax(150px,1.5fr) minmax(100px,auto);gap:16px;align-items:center;padding:15px 20px}.credential-header{color:#858b91;background:#191b1d;text-transform:uppercase;font-size:10px;letter-spacing:.09em;font-weight:700}.credential-row{border-top:1px solid #292c2f;font-size:13px;min-height:66px}.credential-name,.credential-type,.credential-username{overflow-wrap:anywhere;min-width:0}.credential-type,.credential-username{color:#a8adb3}.credential-actions{display:flex;justify-content:flex-end;gap:8px}.credential-overlay{justify-content:center;padding:20px;overflow-y:auto}.credential-modal{max-height:calc(100vh - 40px);overflow-y:auto}.credential-form{display:grid;gap:15px;margin-top:22px}.credential-form label{display:grid;gap:7px;font-size:12px;font-weight:600;color:#d9dbde}.credential-form input,.credential-form select,.credential-form textarea{width:100%}.credential-form textarea{min-height:125px;resize:vertical;background:#17191b;color:#d9dbde;border:1px solid #303337;border-radius:8px;padding:11px 12px;font:12px monospace}.credential-hint{margin:0!important}.credential-modal-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:12px}.credential-delete{color:#fff;background:#943e47;border-color:#a94b55}.credential-delete:hover{background:#af4b56}
 @media(max-width:700px){.credential-header{display:none}.credential-row{grid-template-columns:minmax(0,1fr) auto;gap:7px 12px}.credential-name{grid-column:1}.credential-type{grid-column:1}.credential-username{grid-column:1}.credential-actions{grid-column:2;grid-row:1 / span 3;align-self:center}}
+
+/* Scrollable panels share the same muted colors without changing their scrolling. */
+*{scrollbar-color:#4b5056 #17191b}
+*::-webkit-scrollbar{width:12px;height:12px}
+*::-webkit-scrollbar-track{background:#17191b}
+*::-webkit-scrollbar-thumb{background:#4b5056;border-radius:8px;border:2px solid #17191b}
+*::-webkit-scrollbar-thumb:hover{background:#626870}
