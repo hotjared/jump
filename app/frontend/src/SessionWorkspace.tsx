@@ -143,7 +143,7 @@ export default function SessionWorkspace({ sessions, activeId, select, close, fi
         <button type="button" role="tab" aria-selected={activeId === session.id} aria-controls={`session-${session.id}`}
           ref={node => { if (node) tabRefs.current.set(session.id, node); else tabRefs.current.delete(session.id) }}
           onClick={() => select(session.id)}>
-          <span className={`session-dot ${session.state}`} aria-hidden="true" />{session.name} <small>{session.protocol} · {session.state}</small>
+          <span className={`session-dot state-${session.state}`} aria-hidden="true" />{session.name} <small>{session.protocol} · {session.state}</small>
         </button>
         <button type="button" className="session-tab-close" aria-label={`Close ${session.name} ${session.protocol} session`} onClick={() => closeTab(session.id)}>×</button>
       </div>)}
@@ -151,7 +151,7 @@ export default function SessionWorkspace({ sessions, activeId, select, close, fi
     {sessions.map(session => <div id={`session-${session.id}`} role="tabpanel" aria-label={`${session.name} ${session.protocol} session`}
       className="session-view" key={session.id} hidden={activeId !== session.id}>
       <div className="session-heading"><div><strong>{session.name}</strong><span className="muted">{session.platform} · {session.protocol}</span>
-        <span className={`session-state ${session.state}`}><i />{session.state}</span></div>
+        <span className={`session-state state-${session.state}`}><i />{session.state}</span></div>
         <div className="session-actions">{fileDevices.includes(session.deviceId) && <button className="button" onClick={() => openFiles(session.deviceId)}>Files</button>}{session.protocol === 'RDP' && <><RdpActions session={session} /><button className="button" onClick={e => e.currentTarget.closest('.session-view')?.requestFullscreen()}>Fullscreen</button></>}
           <button className="button" onClick={() => closeTab(session.id)}>Disconnect</button></div></div>
       {session.error && <p className="session-error" role="alert">{session.error}</p>}
