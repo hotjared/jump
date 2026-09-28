@@ -40,9 +40,10 @@
 .session-heading strong{font-size:16px}
 .session-state{display:inline-flex;align-items:center;gap:7px;text-transform:capitalize;color:#aaa;font-size:11px}
 .session-error{color:#e39999;font-size:12px}
-.workspace-terminal{flex:1;min-height:0;min-width:0;overflow:hidden;background:#111318;padding:0 12px;border:1px solid #303337;border-radius:8px 8px 0 0}
-/* FitAddon subtracts xterm padding when counting rows, but not padding on its parent. */
-.workspace-terminal .xterm{height:100%;padding:12px 0 28px}
+.workspace-terminal{display:flex;flex:1;min-height:0;min-width:0;overflow:hidden;background:#111318;padding:12px 12px 28px;border:1px solid #303337;border-radius:8px 8px 0 0}
+/* FitAddon measures its immediate parent; this inner viewport excludes the outer spacing. */
+.workspace-terminal-viewport{flex:1;min-height:0;min-width:0;overflow:hidden}
+.workspace-terminal-viewport .xterm{height:100%}
 .session-footer{color:#858c93;padding:11px 4px;font-size:11px}
 .session-tab button:focus-visible,.session-heading button:focus-visible{outline:2px solid #dce5ed;outline-offset:2px}
 .workspace-desktop{flex:1;min-height:0;min-width:0;overflow:hidden;background:#111318;border:1px solid #303337;border-radius:8px 8px 0 0;display:flex;align-items:center;justify-content:center}
