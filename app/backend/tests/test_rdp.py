@@ -226,6 +226,7 @@ def test_attached_rdp_audits_start_and_end_without_secret(client, db, monkeypatc
         password,
         on_ready,
         on_activity,
+        on_stage,
     ):
         assert (session_id, device_id, connection_id) == (sid, str(device.id), device.connection_id)
         assert user_id == str(db.get(RemoteSession, uuid.UUID(sid)).user_id)
@@ -237,6 +238,7 @@ def test_attached_rdp_audits_start_and_end_without_secret(client, db, monkeypatc
             "EXAMPLE",
             b"do-not-expose-me",
         )
+        on_stage("protocol_ready")
         on_ready()
         on_activity()
         await ws.send_text(instruction("ready", "opaque-guacd-id").decode())

@@ -184,6 +184,7 @@ async def rdp_gateway(
     password: bytes,
     on_ready: Callable[[], None],
     on_activity: Callable[[], None],
+    on_stage: Callable[[str], None] | None = None,
 ) -> str:
     """Return a fixed reason code; never surface guacd's arbitrary error strings."""
     cfg = settings()
@@ -191,6 +192,10 @@ async def rdp_gateway(
     to_guacd_bytes = 0
     first_close = "unknown"
     stage = "broker_connect"
+
+    def reached(value: str) -> None:
+        if on_stage:
+            on_stage(value)
 
     def mark_close(reason: str) -> None:
         nonlocal first_close
@@ -214,6 +219,7 @@ async def rdp_gateway(
             open_timeout=10,
             close_timeout=2,
         )
+        reached("broker_connected")
         await broker.send(json.dumps({"version": 1, "type": "tcp_open", "session_id": session_id}))
         first = json.loads(await asyncio.wait_for(broker.recv(), timeout=12))
         if first.get("session_id") != session_id or first.get("type") != "tcp_opened":
@@ -224,6 +230,7 @@ async def rdp_gateway(
                 else "agent_disconnected"
             )
         logger.info("rdp agent TCP opened session=%s", session_id)
+        reached("agent_tunnel_opened")
 
         accepted: asyncio.Future[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = (
             asyncio.get_running_loop().create_future()
@@ -340,6 +347,7 @@ async def rdp_gateway(
         except (OSError, TimeoutError):
             mark_close("guacd_connect_failed")
             return "guacd_unavailable"
+        reached("guacd_connected")
         guacd_writer.write(instruction("select", "rdp"))
         await guacd_writer.drain()
         _, args = await read_instruction(guacd_reader)
@@ -381,6 +389,7 @@ async def rdp_gateway(
         )
         await guacd_writer.drain()
         stage = "guacd_connect_sent"
+        reached("guacd_handshake_started")
         options["password"] = ""
         raw, first_guac = await read_instruction(guacd_reader)
         if first_guac[0] != "ready":
@@ -394,6 +403,7 @@ async def rdp_gateway(
             return (
                 guacd_failure(first_guac) if first_guac[0] == "error" else "authentication_failed"
             )
+        reached("protocol_ready")
         on_ready()
         try:
             await browser.send_text(raw)

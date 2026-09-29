@@ -11,7 +11,16 @@ from test_api import BROKER, ORIGIN, as_user, write_headers
 
 from jump.db import get_db
 from jump.main import app, finish_ssh_session, trust_ssh_host_key
-from jump.models import AgentIdentity, AuditEvent, Credential, Device, RemoteSession, Role, User
+from jump.models import (
+    AgentIdentity,
+    AuditEvent,
+    Credential,
+    Device,
+    RemoteSession,
+    RemoteSessionDiagnosticEvent,
+    Role,
+    User,
+)
 
 
 @pytest.fixture
@@ -281,6 +290,22 @@ def test_browser_gateway_opens_only_selected_credential(client, db, monkeypatch)
     assert base64.b64decode(sent[0]["secret"]) == b"super-private-password"
     session = db.get(RemoteSession, uuid.UUID(sid))
     assert session.state == "closed"
+    assert [
+        event.stage
+        for event in db.scalars(
+            select(RemoteSessionDiagnosticEvent)
+            .where(RemoteSessionDiagnosticEvent.session_id == session.id)
+            .order_by(RemoteSessionDiagnosticEvent.created_at, RemoteSessionDiagnosticEvent.id)
+        )
+    ] == [
+        "session_created",
+        "browser_attached",
+        "broker_connected",
+        "agent_stream_opened",
+        "host_key_verified",
+        "session_active",
+        "session_closed",
+    ]
     assert device.ssh_host_key == "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     assert db.scalar(select(AuditEvent).where(AuditEvent.event_type == "ssh_session_started"))
 

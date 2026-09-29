@@ -283,6 +283,7 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(
 
         browser = Browser()
         started = []
+        stages = []
         try:
             reason = await asyncio.wait_for(
                 rdp.rdp_gateway(
@@ -299,11 +300,19 @@ def test_guacd_handshake_bridges_fixed_rdp_bytes_and_omits_redirection(
                     b"secret-password",
                     lambda: started.append(True),
                     lambda: None,
+                    stages.append,
                 ),
                 timeout=5,
             )
             assert reason == ("browser_disconnected" if ready_send_fails else "session_closed")
             assert started == [True]
+            assert stages == [
+                "broker_connected",
+                "agent_tunnel_opened",
+                "guacd_connected",
+                "guacd_handshake_started",
+                "protocol_ready",
+            ]
             if ready_send_fails:
                 assert browser.sent == []
                 assert "first_close=browser_ready_send_failed" in caplog.text
