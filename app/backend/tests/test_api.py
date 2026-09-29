@@ -70,7 +70,7 @@ def test_system_info_is_authenticated_and_exposes_only_versions(client, db, monk
     assert client.get("/api/system-info").status_code == 401
     as_user(client, db, Role.USER)
     monkeypatch.setattr("jump.main.cfg.jump_server_version", "v0.1.6")
-    monkeypatch.setattr("jump.main.cfg.jump_agent_version", "v0.1.5")
+    monkeypatch.setattr("jump.main.latest_agent_release", lambda: "v0.1.5")
     monkeypatch.setattr("jump.main.cfg.oidc_client_secret", "should-never-appear")
     response = client.get("/api/system-info")
     assert response.status_code == 200
@@ -80,7 +80,7 @@ def test_system_info_is_authenticated_and_exposes_only_versions(client, db, monk
     }
     assert "should-never-appear" not in response.text
 
-    monkeypatch.setattr("jump.main.cfg.jump_agent_version", "")
+    monkeypatch.setattr("jump.main.latest_agent_release", lambda: None)
     assert client.get("/api/system-info").json() == {
         "server_version": "v0.1.6",
         "target_agent_version": None,
@@ -104,7 +104,8 @@ def test_agent_downloads_are_admin_only_and_have_no_enrollment_token(client, db,
     assert client.get("/api/agent-downloads").status_code == 403
     user.role = Role.ADMIN
     db.commit()
-    monkeypatch.setattr("jump.main.cfg.jump_server_version", "v1.2.3")
+    monkeypatch.setattr("jump.main.cfg.jump_server_version", "dev")
+    monkeypatch.setattr("jump.main.latest_agent_release", lambda: "v1.2.3")
     response = client.get("/api/agent-downloads")
     assert response.status_code == 200
     links = response.json()

@@ -1,4 +1,4 @@
-"""Deterministic download links for official native agent releases."""
+"""Discover and validate official native agent releases."""
 
 import re
 import time
@@ -7,6 +7,7 @@ from threading import Lock
 import httpx
 
 REPOSITORY = "https://github.com/hotjared/jump"
+RELEASES_API = "https://api.github.com/repos/hotjared/jump/releases?per_page=100"
 ASSETS = {
     "linux": "jump-agent-linux-amd64",
     "windows": "jump-agent-windows-amd64.exe",
@@ -16,19 +17,74 @@ _STABLE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", re.A
 _SHA = re.compile(r"[a-fA-F0-9]{64}", re.ASCII)
 _cache: dict[str, tuple[float, dict[str, str]]] = {}
 _lock = Lock()
+_latest_lock = Lock()
+_latest_version: str | None = None
+_latest_expires = 0.0
+
+
+def latest_agent_release() -> str | None:
+    """Cache the newest usable stable release, retaining a validated value on API failure."""
+    global _latest_version, _latest_expires
+    with _latest_lock:
+        current_time = time.monotonic()
+        if current_time < _latest_expires:
+            return _latest_version
+        try:
+            with httpx.Client(timeout=5, follow_redirects=False) as client:
+                response = client.get(
+                    RELEASES_API, headers={"Accept": "application/vnd.github+json"}
+                )
+                response.raise_for_status()
+                if len(response.content) > 1_000_000:
+                    raise ValueError("Release listing too large")
+                listing = response.json()
+            if not isinstance(listing, list):
+                raise ValueError("Invalid release listing")
+            required = {*ASSETS.values(), "SHA256SUMS"}
+            candidates = []
+            for release in listing:
+                if (
+                    not isinstance(release, dict)
+                    or release.get("draft") is not False
+                    or release.get("prerelease") is not False
+                ):
+                    continue
+                tag = release.get("tag_name")
+                number = release_number(tag) if isinstance(tag, str) else None
+                assets = release.get("assets")
+                if number is None or not isinstance(assets, list):
+                    continue
+                names = {
+                    asset.get("name")
+                    for asset in assets
+                    if isinstance(asset, dict)
+                    and isinstance(asset.get("name"), str)
+                    and asset.get("state") == "uploaded"
+                    and isinstance(asset.get("size"), int)
+                    and asset["size"] > 0
+                }
+                if required <= names:
+                    candidates.append((number, tag))
+            # A successful empty listing is not a temporary failure: there is no usable target.
+            _latest_version = max(candidates)[1] if candidates else None
+            _latest_expires = time.monotonic() + 300
+        except (httpx.HTTPError, ValueError, TypeError):
+            # Back off on failures too, so an unavailable API cannot stall every request.
+            _latest_expires = time.monotonic() + 60
+        return _latest_version
 
 
 def valid_release_tag(tag: str) -> bool:
     return _TAG.fullmatch(tag) is not None
 
 
-def release_number(tag: str) -> tuple[int, int, int] | None:
+def release_number(tag: str | None) -> tuple[int, int, int] | None:
     """Only stable published versions are eligible for unattended execution."""
-    match = _STABLE.fullmatch(tag)
+    match = _STABLE.fullmatch(tag) if isinstance(tag, str) else None
     return tuple(map(int, match.groups())) if match else None
 
 
-def newer_release(current: str, target: str) -> bool:
+def newer_release(current: str, target: str | None) -> bool:
     old, new = release_number(current), release_number(target)
     return old is not None and new is not None and new > old
 
@@ -82,9 +138,8 @@ def release_asset(version: str, platform: str) -> dict[str, str]:
     }
 
 
-def agent_downloads(server_version: str, agent_version: str = "") -> dict:
-    version = agent_version or server_version
-    if not valid_release_tag(version):
+def agent_downloads(version: str | None) -> dict:
+    if version is None or release_number(version) is None:
         return {"version": None, "downloads": {}, "checksums": None}
     base = f"{REPOSITORY}/releases/download/{version}"
     return {

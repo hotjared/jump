@@ -37,11 +37,11 @@ For upgrades, rollback, GHCR visibility, and local image builds for development,
 
 OIDC is recommended when you already have an identity provider. Local auth runs without an external IdP. `AUTH_MODE=oidc` does not expose the local password login endpoint. Local passwords do not have MFA in this release; user management and local MFA are planned separately.
 
-Admins can update an older `agent_update_v1` service from its device details when `JUMP_AGENT_VERSION` points to a newer published stable release. Agents installed before this capability need [one manual upgrade](docs/deployment.md#administrator-initiated-agent-updates) first. Jump blocks updates during active SSH sessions.
+Admins can update an older `agent_update_v1` service from its device details when a newer stable native agent release is published. Agents installed before this capability need [one manual upgrade](docs/deployment.md#administrator-initiated-agent-updates) first. Jump blocks updates during active SSH sessions.
 
 ## Native agent downloads
 
-Jump offers Linux amd64 and Windows amd64 binaries from the matching [GitHub Release](https://github.com/hotjared/jump/releases). The enrollment UI links to the selected binary and `SHA256SUMS`; no Go toolchain or source checkout is needed on endpoints. A tagged server image offers its matching agent release. When deploying `latest` or a commit SHA, set `JUMP_AGENT_VERSION` to an existing `v*` release tag in `.env` and restart Jump. The UI does not offer a download until a release version is known and its assets have been published.
+Jump offers Linux amd64 and Windows amd64 binaries from the latest usable stable [GitHub Release](https://github.com/hotjared/jump/releases). The enrollment UI links to the selected binary and `SHA256SUMS`; no Go toolchain or source checkout is needed on endpoints. Jump checks for new releases about every five minutes, independently of the server image tag. If GitHub is temporarily unavailable, it keeps the last validated release. Until a release has been validated, the UI offers no download or update.
 
 Download `SHA256SUMS` alongside the binary. On Linux, verify the selected entry with:
 
