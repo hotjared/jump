@@ -39,7 +39,7 @@ describe('operational dashboard', () => {
       { filename: 'report.pdf', reason: 'transfer_failed', remote_path: '/secret/path', token: 'secret-token' })])
     const issues = screen.getByRole('region', { name: 'Needs Attention' })
     expect(within(issues).getByText('Agent update failed')).toBeTruthy()
-    expect(within(issues).getByText('reconnect timeout')).toBeTruthy()
+    expect(within(issues).getByText('Agent did not reconnect in time')).toBeTruthy()
     expect(within(issues).getByText('report.pdf · transfer failed')).toBeTruthy()
     expect(issues.textContent).not.toContain('/secret/path')
     expect(document.body.textContent).not.toContain('secret-token')

@@ -33,6 +33,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
+from .audit import safe_detail
 from .config import settings
 from .credentials import create_credential, decrypt_for_gateway
 from .db import get_db
@@ -1073,7 +1074,11 @@ def rename_group(
         raise HTTPException(404)
     item.name = body.name.strip()
     db.add(
-        AuditEvent(event_type="group_updated", actor_user_id=user.id, detail={"id": str(group_id)})
+        AuditEvent(
+            event_type="group_updated",
+            actor_user_id=user.id,
+            detail={"id": str(group_id), "name": item.name},
+        )
     )
     db.commit()
     return {"id": item.id, "name": item.name}
@@ -1086,7 +1091,11 @@ def delete_group(group_id: uuid.UUID, user: User = Depends(admin), db: Session =
         raise HTTPException(404)
     db.delete(item)
     db.add(
-        AuditEvent(event_type="group_deleted", actor_user_id=user.id, detail={"id": str(group_id)})
+        AuditEvent(
+            event_type="group_deleted",
+            actor_user_id=user.id,
+            detail={"id": str(group_id), "name": item.name},
+        )
     )
     db.commit()
     return {"ok": True}
@@ -1117,7 +1126,13 @@ def rename_tag(
     if not item:
         raise HTTPException(404)
     item.name = body.name.strip()
-    db.add(AuditEvent(event_type="tag_updated", actor_user_id=user.id, detail={"id": str(tag_id)}))
+    db.add(
+        AuditEvent(
+            event_type="tag_updated",
+            actor_user_id=user.id,
+            detail={"id": str(tag_id), "name": item.name},
+        )
+    )
     db.commit()
     return {"id": item.id, "name": item.name}
 
@@ -1128,7 +1143,13 @@ def delete_tag(tag_id: uuid.UUID, user: User = Depends(admin), db: Session = Dep
     if not item:
         raise HTTPException(404)
     db.delete(item)
-    db.add(AuditEvent(event_type="tag_deleted", actor_user_id=user.id, detail={"id": str(tag_id)}))
+    db.add(
+        AuditEvent(
+            event_type="tag_deleted",
+            actor_user_id=user.id,
+            detail={"id": str(tag_id), "name": item.name},
+        )
+    )
     db.commit()
     return {"ok": True}
 
@@ -1166,14 +1187,49 @@ def revoke(token_id: uuid.UUID, user: User = Depends(admin), db: Session = Depen
 
 @app.get("/api/audit")
 def audit(user: User = Depends(admin), db: Session = Depends(get_db)):
-    events = db.scalars(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(100))
+    events = list(
+        db.scalars(
+            select(AuditEvent)
+            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+            .limit(100)
+        )
+    )
+    actor_ids = {e.actor_user_id for e in events if e.actor_user_id}
+    device_ids = {e.device_id for e in events if e.device_id}
+    actors = (
+        {u.id: u for u in db.scalars(select(User).where(User.id.in_(actor_ids)))}
+        if actor_ids
+        else {}
+    )
+    devices = (
+        {d.id: d for d in db.scalars(select(Device).where(Device.id.in_(device_ids)))}
+        if device_ids
+        else {}
+    )
     return [
         {
             "id": e.id,
             "event_type": e.event_type,
             "actor_user_id": e.actor_user_id,
             "device_id": e.device_id,
-            "detail": e.detail,
+            "actor": (
+                {
+                    "name": actors[e.actor_user_id].display_name,
+                    "email": actors[e.actor_user_id].email,
+                }
+                if e.actor_user_id in actors
+                else None
+            ),
+            "device": (
+                {
+                    "id": e.device_id,
+                    "name": devices[e.device_id].display_name or devices[e.device_id].hostname,
+                }
+                if e.device_id in devices
+                else None
+            ),
+            "detail": safe_detail(e.event_type, e.detail),
+            "request_id": e.request_id,
             "created_at": e.created_at,
         }
         for e in events
