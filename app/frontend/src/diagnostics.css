@@ -17,3 +17,15 @@
 .diagnostics-failure summary{cursor:pointer;color:#a3a8ae}.diagnostics-failure dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;overflow-wrap:anywhere}
 .diagnostics-failure dt{color:#858b92}.diagnostics-failure dd{margin:3px 0 0}
 @media(max-width:700px){.diagnostics-counts{grid-template-columns:repeat(2,minmax(0,1fr))}.diagnostics-component{grid-template-columns:9px minmax(0,1fr) auto;gap:9px}.diagnostics-component small{grid-column:2/4}.diagnostics-failure dl{grid-template-columns:1fr}}
+.diagnostics-session{border-bottom:1px solid #292b2e;font-size:12px}
+.diagnostics-session:last-child{border-bottom:0}
+.diagnostics-session>summary{cursor:pointer;display:grid;grid-template-columns:minmax(120px,1fr) 55px 85px 110px 45px;gap:12px;align-items:center;padding:14px 20px;list-style:none}
+.diagnostics-session>summary::-webkit-details-marker{display:none}
+.diagnostics-session>summary time,.diagnostics-session>summary>span:last-child{color:#a3a8ae}
+.diagnostics-state{text-transform:capitalize;color:#a3a8ae}.diagnostics-state.active{color:#50b889}.diagnostics-state.failed{color:#db6868}
+.diagnostics-trace{padding:4px 20px 16px 32px;border-top:1px solid #292b2e}
+.diagnostics-trace>div{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:12px;padding:7px 0}
+.diagnostics-trace>div time,.diagnostics-trace dt{color:#858b92}
+.diagnostics-trace dl{display:flex;gap:12px 24px;flex-wrap:wrap;margin:14px 0 0;border-top:1px solid #292b2e;padding-top:12px;overflow-wrap:anywhere}
+.diagnostics-trace dd{margin:4px 0 0}
+@media(max-width:700px){.diagnostics-session>summary{grid-template-columns:minmax(0,1fr) 40px 65px;gap:8px}.diagnostics-session>summary time{grid-column:1/2}}

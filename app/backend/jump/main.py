@@ -49,6 +49,7 @@ from .models import (
     Group,
     QuickConnectPreference,
     RemoteSession,
+    RemoteSessionDiagnosticEvent,
     Tag,
     User,
     now,
@@ -76,6 +77,7 @@ from .security import (
     master_key,
     require_admin,
 )
+from .session_diagnostics import STAGES, record_stage
 
 log = logging.getLogger("jump")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -830,6 +832,59 @@ DIAGNOSTIC_FAILURES = (
     "file_download_failed",
     "agent_update_failed",
 )
+
+
+@app.get("/api/diagnostics/sessions")
+def diagnostic_sessions(user: User = Depends(admin), db: Session = Depends(get_db)):
+    sessions = db.scalars(
+        select(RemoteSession)
+        .where(RemoteSession.protocol.in_(("ssh", "rdp")))
+        .order_by(RemoteSession.created_at.desc(), RemoteSession.id.desc())
+        .limit(20)
+    ).all()
+    if not sessions:
+        return []
+    ids = [session.id for session in sessions]
+    devices = {
+        device.id: device.display_name or device.hostname
+        for device in db.scalars(
+            select(Device).where(
+                Device.id.in_({session.device_id for session in sessions if session.device_id})
+            )
+        )
+    }
+    events = db.scalars(
+        select(RemoteSessionDiagnosticEvent)
+        .where(RemoteSessionDiagnosticEvent.session_id.in_(ids))
+        .order_by(RemoteSessionDiagnosticEvent.created_at, RemoteSessionDiagnosticEvent.id)
+    ).all()
+    stages = {session_id: [] for session_id in ids}
+    for event in events:
+        if event.stage in STAGES:
+            stages[event.session_id].append({"stage": event.stage, "created_at": event.created_at})
+    safe_reasons = set(SSH_ERRORS) | set(RDP_ERRORS)
+    return [
+        {
+            "id": session.id,
+            "protocol": session.protocol,
+            "state": session.state
+            if session.state in {"connecting", "active", "closed", "failed"}
+            else "failed",
+            "device": {
+                "id": session.device_id,
+                "name": devices.get(session.device_id) or session.device_name or "Deleted device",
+            },
+            "created_at": session.created_at,
+            "attached_at": session.attached_at,
+            "closed_at": session.closed_at,
+            "failure_reason": session.failure_reason
+            if session.failure_reason in safe_reasons
+            else None,
+            "request_id": session.request_id,
+            "stages": stages[session.id],
+        }
+        for session in sessions
+    ]
 
 
 @app.get("/api/diagnostics")
@@ -1788,13 +1843,17 @@ def new_ssh_session(
     session = RemoteSession(
         id=uuid.uuid4(),
         device_id=device_id,
+        device_name=device.display_name or device.hostname,
         user_id=user.id,
         credential_id=credential.id,
         columns=body.columns,
         rows=body.rows,
         protocol="ssh",
+        request_id=request.state.request_id,
     )
     db.add(session)
+    db.flush()
+    record_stage(db, session.id, "session_created")
     db.commit()
     return {"id": session.id, "state": session.state, "created_at": session.created_at}
 
@@ -1803,6 +1862,7 @@ def new_ssh_session(
 def new_rdp_session(
     device_id: uuid.UUID,
     body: RDPSessionInput,
+    request: Request,
     user: User = Depends(admin),
     db: Session = Depends(get_db),
 ):
@@ -1828,14 +1888,18 @@ def new_rdp_session(
     session = RemoteSession(
         id=uuid.uuid4(),
         device_id=device_id,
+        device_name=device.display_name or device.hostname,
         user_id=user.id,
         credential_id=credential.id,
         protocol="rdp",
         columns=body.width,
         rows=body.height,
         dpi=body.dpi,
+        request_id=request.state.request_id,
     )
     db.add(session)
+    db.flush()
+    record_stage(db, session.id, "session_created")
     db.commit()
     return {
         "id": session.id,
@@ -1885,6 +1949,9 @@ def finish_remote_session(db: Session, session: RemoteSession, reason: str | Non
     )
     session.closed_at = now()
     session.failure_reason = reason if session.state == "failed" else None
+    record_stage(
+        db, session.id, "session_closed" if session.state == "closed" else "session_failed"
+    )
     db.add(
         AuditEvent(
             event_type=f"{session.protocol}_session_ended"
@@ -1997,6 +2064,8 @@ async def browser_ssh_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
         await ws.close(code=1008)
         return
     await ws.accept()
+    record_stage(db, session.id, "browser_attached")
+    db.commit()
     reason = "agent_unavailable"
     backend = None
     try:
@@ -2028,6 +2097,8 @@ async def browser_ssh_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
                 open_timeout=10,
                 close_timeout=2,
             )
+            record_stage(db, session.id, "broker_connected")
+            db.commit()
             await backend.send(
                 json.dumps(
                     {
@@ -2054,11 +2125,14 @@ async def browser_ssh_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
             raise RuntimeError(
                 first.get("code") if first.get("code") in SSH_ERRORS else "agent_unavailable"
             )
-        if first.get("type") != "session_opened" or not trust_ssh_host_key(
-            db, session, first.get("fingerprint", "")
-        ):
+        if first.get("type") != "session_opened":
+            raise RuntimeError("agent_unavailable")
+        record_stage(db, session.id, "agent_stream_opened")
+        if not trust_ssh_host_key(db, session, first.get("fingerprint", "")):
             raise RuntimeError("host_key_mismatch")
+        record_stage(db, session.id, "host_key_verified")
         session.state, session.connected_at, session.last_activity_at = "active", now(), now()
+        record_stage(db, session.id, "session_active")
         db.add(
             AuditEvent(
                 event_type="ssh_session_started",
@@ -2259,6 +2333,8 @@ async def browser_rdp_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
         await ws.close(code=1008)
         return
     await ws.accept(subprotocol="guacamole")
+    record_stage(db, session.id, "browser_attached")
+    db.commit()
     reason = "agent_disconnected"
     try:
         device = db.get(Device, session.device_id)
@@ -2279,6 +2355,7 @@ async def browser_rdp_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
 
         def started() -> None:
             session.state, session.connected_at, session.last_activity_at = "active", now(), now()
+            record_stage(db, session.id, "session_active")
             db.add(
                 AuditEvent(
                     event_type="rdp_session_started",
@@ -2313,6 +2390,7 @@ async def browser_rdp_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
                 bytes(secret),
                 started,
                 activity,
+                lambda stage: (record_stage(db, session.id, stage), db.commit()),
             )
         finally:
             secret[:] = b"\0" * len(secret)

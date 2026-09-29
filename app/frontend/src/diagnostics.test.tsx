@@ -22,7 +22,7 @@ it('requires admin without fetching', () => {
 })
 
 it('shows health, counts, safe failures and refreshes on demand', async () => {
-  const fetcher = vi.fn().mockResolvedValue({ ok: true, json: async () => result })
+  const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve({ ok: true, json: async () => url.endsWith('/sessions') ? [] : result }))
   vi.stubGlobal('fetch', fetcher)
   render(<Diagnostics admin />)
   expect(await screen.findByText('PROD-DC01')).toBeTruthy()
@@ -33,6 +33,73 @@ it('shows health, counts, safe failures and refreshes on demand', async () => {
   expect(screen.queryByText('/private/secret')).toBeNull()
   expect(screen.queryByText('do-not-show')).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
-  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2))
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(4))
   expect(fetcher).toHaveBeenCalledWith('/api/diagnostics', expect.objectContaining({ credentials: 'same-origin' }))
+  expect(fetcher).toHaveBeenCalledWith('/api/diagnostics/sessions', expect.objectContaining({ credentials: 'same-origin' }))
+})
+
+it('shows SSH and RDP traces with IDs only in expanded details', async () => {
+  const session = (protocol: 'ssh' | 'rdp', state: 'closed' | 'failed', name: string) => ({
+    id: `${protocol}-session-id`, protocol, state, device: { id: 'device-id', name },
+    created_at: '2026-09-29T12:00:00Z', attached_at: '2026-09-29T12:00:01Z', closed_at: '2026-09-29T12:00:03Z',
+    request_id: `${protocol}-request-id`, failure_reason: state === 'failed' ? 'authentication_failed' : null,
+    stages: ['session_created', 'browser_attached', 'broker_connected', protocol === 'ssh' ? 'host_key_verified' : 'protocol_ready',
+      state === 'closed' ? 'session_closed' : 'session_failed'].map((stage, index) => ({ stage, created_at: `2026-09-29T12:00:0${index}Z` })),
+    password: 'do-not-render', connection_id: 'private-connection',
+  })
+  const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve({ ok: true, json: async () =>
+    url.endsWith('/sessions') ? [session('ssh', 'closed', 'docker01'), session('rdp', 'failed', 'Deleted device')] : result }))
+  vi.stubGlobal('fetch', fetcher)
+  render(<Diagnostics admin />)
+  const section = await screen.findByRole('region', { name: 'Recent remote sessions' })
+  expect(section.textContent).toContain('docker01')
+  expect(section.textContent).toContain('Deleted device')
+  expect(section.textContent).toContain('SSH')
+  expect(section.textContent).toContain('RDP')
+  expect(section.querySelectorAll('summary')[0].textContent).not.toContain('ssh-session-id')
+  expect(section.querySelectorAll('summary')[1].textContent).not.toContain('rdp-request-id')
+  expect(section.textContent).toContain('Host key verified')
+  expect(section.textContent).toContain('Protocol ready')
+  expect(section.textContent).toContain('Authentication failed')
+  expect(section.textContent).not.toContain('do-not-render')
+  expect(section.textContent).not.toContain('private-connection')
+})
+
+it('keeps core diagnostics visible when session traces fail and retries both on Refresh', async () => {
+  let tracesAvailable = false
+  const trace = { id: 'session-1', protocol: 'ssh', state: 'closed', device: { id: null, name: 'Former docker01' },
+    created_at: '2026-09-29T12:00:00Z', attached_at: null, closed_at: '2026-09-29T12:00:03Z',
+    failure_reason: null, request_id: null, stages: [{ stage: 'session_created', created_at: '2026-09-29T12:00:00Z' }] }
+  const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve(url.endsWith('/sessions')
+    ? { ok: tracesAvailable, json: async () => [trace] }
+    : { ok: true, json: async () => result }))
+  vi.stubGlobal('fetch', fetcher)
+  render(<Diagnostics admin />)
+  expect(await screen.findByText('Jump API')).toBeTruthy()
+  expect(await screen.findByText('Session diagnostics unavailable.')).toBeTruthy()
+  expect(screen.getByText('PROD-DC01')).toBeTruthy()
+  expect(screen.queryByText('Could not refresh diagnostics.')).toBeNull()
+  tracesAvailable = true
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+  expect(await screen.findByText('Former docker01')).toBeTruthy()
+  expect(screen.queryByText('Session diagnostics unavailable.')).toBeNull()
+  expect(fetcher).toHaveBeenCalledTimes(4)
+  expect(fetcher.mock.calls.filter(([url]) => url === '/api/diagnostics')).toHaveLength(2)
+  expect(fetcher.mock.calls.filter(([url]) => url === '/api/diagnostics/sessions')).toHaveLength(2)
+})
+
+it('keeps the last core result and shows the page error when core refresh fails', async () => {
+  let coreAvailable = true
+  const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve(url.endsWith('/sessions')
+    ? { ok: true, json: async () => [] }
+    : { ok: coreAvailable, json: async () => result }))
+  vi.stubGlobal('fetch', fetcher)
+  render(<Diagnostics admin />)
+  expect(await screen.findByText('Jump API')).toBeTruthy()
+  coreAvailable = false
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Could not refresh diagnostics. Showing the last check.')
+  expect(screen.getByText('Jump API')).toBeTruthy()
+  expect(screen.queryByText('Session diagnostics unavailable.')).toBeNull()
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(4))
 })

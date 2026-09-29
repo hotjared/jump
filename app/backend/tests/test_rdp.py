@@ -127,6 +127,7 @@ def test_rdp_authorization_capability_credential_and_lifecycle(client, db):
     assert "do-not-expose-me" not in response.text
     session = db.get(RemoteSession, uuid.UUID(response.json()["id"]))
     assert session.protocol == "rdp" and session.user_id == user.id and session.dpi == 96
+    assert session.device_name == device.hostname
     session.state = "active"
     db.commit()
     finish_remote_session(db, session, "browser_disconnected")
@@ -226,6 +227,7 @@ def test_attached_rdp_audits_start_and_end_without_secret(client, db, monkeypatc
         password,
         on_ready,
         on_activity,
+        on_stage,
     ):
         assert (session_id, device_id, connection_id) == (sid, str(device.id), device.connection_id)
         assert user_id == str(db.get(RemoteSession, uuid.UUID(sid)).user_id)
@@ -237,6 +239,7 @@ def test_attached_rdp_audits_start_and_end_without_secret(client, db, monkeypatc
             "EXAMPLE",
             b"do-not-expose-me",
         )
+        on_stage("protocol_ready")
         on_ready()
         on_activity()
         await ws.send_text(instruction("ready", "opaque-guacd-id").decode())

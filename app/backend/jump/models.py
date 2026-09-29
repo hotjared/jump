@@ -152,7 +152,10 @@ class QuickConnectPreference(Base):
 class RemoteSession(Base):
     __tablename__ = "remote_sessions"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    device_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"))
+    device_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("devices.id", ondelete="SET NULL"), nullable=True
+    )
+    device_name: Mapped[str | None] = mapped_column(String(255))
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     credential_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("credentials.id", ondelete="SET NULL"), nullable=True
@@ -168,7 +171,22 @@ class RemoteSession(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     failure_reason: Mapped[str | None] = mapped_column(String(64))
+    request_id: Mapped[str | None] = mapped_column(String(36))
     __table_args__ = (Index("ix_remote_sessions_device", "device_id"),)
+
+
+class RemoteSessionDiagnosticEvent(Base):
+    __tablename__ = "remote_session_diagnostic_events"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("remote_sessions.id", ondelete="CASCADE")
+    )
+    stage: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    __table_args__ = (
+        Index("ix_remote_session_diagnostic_session", "session_id"),
+        UniqueConstraint("session_id", "stage", name="uq_remote_session_diagnostic_stage"),
+    )
 
 
 class AgentUpdate(Base):
