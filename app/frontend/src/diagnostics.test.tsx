@@ -22,7 +22,7 @@ it('requires admin without fetching', () => {
 })
 
 it('shows health, counts, safe failures and refreshes on demand', async () => {
-  const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve({ ok: true, json: async () => url.endsWith('/sessions') ? [] : result }))
+  const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve({ ok: true, json: async () => url.endsWith('/sessions') || url.endsWith('/file-transfers') ? [] : result }))
   vi.stubGlobal('fetch', fetcher)
   render(<Diagnostics admin />)
   expect(await screen.findByText('PROD-DC01')).toBeTruthy()
@@ -33,7 +33,7 @@ it('shows health, counts, safe failures and refreshes on demand', async () => {
   expect(screen.queryByText('/private/secret')).toBeNull()
   expect(screen.queryByText('do-not-show')).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
-  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(4))
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(6))
   expect(fetcher).toHaveBeenCalledWith('/api/diagnostics', expect.objectContaining({ credentials: 'same-origin' }))
   expect(fetcher).toHaveBeenCalledWith('/api/diagnostics/sessions', expect.objectContaining({ credentials: 'same-origin' }))
 })
@@ -48,7 +48,7 @@ it('shows SSH and RDP traces with IDs only in expanded details', async () => {
     password: 'do-not-render', connection_id: 'private-connection',
   })
   const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve({ ok: true, json: async () =>
-    url.endsWith('/sessions') ? [session('ssh', 'closed', 'docker01'), session('rdp', 'failed', 'Deleted device')] : result }))
+    url.endsWith('/file-transfers') ? [] : url.endsWith('/sessions') ? [session('ssh', 'closed', 'docker01'), session('rdp', 'failed', 'Deleted device')] : result }))
   vi.stubGlobal('fetch', fetcher)
   render(<Diagnostics admin />)
   const section = await screen.findByRole('region', { name: 'Recent remote sessions' })
@@ -70,7 +70,7 @@ it('keeps core diagnostics visible when session traces fail and retries both on 
   const trace = { id: 'session-1', protocol: 'ssh', state: 'closed', device: { id: null, name: 'Former docker01' },
     created_at: '2026-09-29T12:00:00Z', attached_at: null, closed_at: '2026-09-29T12:00:03Z',
     failure_reason: null, request_id: null, stages: [{ stage: 'session_created', created_at: '2026-09-29T12:00:00Z' }] }
-  const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve(url.endsWith('/sessions')
+  const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve(url.endsWith('/file-transfers') ? { ok: true, json: async () => [] } : url.endsWith('/sessions')
     ? { ok: tracesAvailable, json: async () => [trace] }
     : { ok: true, json: async () => result }))
   vi.stubGlobal('fetch', fetcher)
@@ -83,14 +83,15 @@ it('keeps core diagnostics visible when session traces fail and retries both on 
   fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
   expect(await screen.findByText('Former docker01')).toBeTruthy()
   expect(screen.queryByText('Session diagnostics unavailable.')).toBeNull()
-  expect(fetcher).toHaveBeenCalledTimes(4)
+  expect(fetcher).toHaveBeenCalledTimes(6)
   expect(fetcher.mock.calls.filter(([url]) => url === '/api/diagnostics')).toHaveLength(2)
   expect(fetcher.mock.calls.filter(([url]) => url === '/api/diagnostics/sessions')).toHaveLength(2)
+  expect(fetcher.mock.calls.filter(([url]) => url === '/api/diagnostics/file-transfers')).toHaveLength(2)
 })
 
 it('keeps the last core result and shows the page error when core refresh fails', async () => {
   let coreAvailable = true
-  const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve(url.endsWith('/sessions')
+  const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve(url.endsWith('/sessions') || url.endsWith('/file-transfers')
     ? { ok: true, json: async () => [] }
     : { ok: coreAvailable, json: async () => result }))
   vi.stubGlobal('fetch', fetcher)
@@ -101,5 +102,47 @@ it('keeps the last core result and shows the page error when core refresh fails'
   expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Could not refresh diagnostics. Showing the last check.')
   expect(screen.getByText('Jump API')).toBeTruthy()
   expect(screen.queryByText('Session diagnostics unavailable.')).toBeNull()
-  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(4))
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(6))
+})
+
+it('renders transfer traces and safe identities, and retries an independent failure', async () => {
+  let available = true
+  const transfer = (state: 'completed' | 'failed' | 'cancelled', filename: string) => ({
+    id: `${state}-transfer-id`, direction: state === 'completed' ? 'download' : 'upload', state, filename,
+    device: { id: null, name: 'Former PROD-DC01' }, expected_size: 12, transferred_bytes: 12,
+    failure_reason: state === 'failed' ? 'permission_denied' : state === 'cancelled' ? 'transfer_cancelled' : null,
+    created_at: '2026-09-29T12:00:00Z', completed_at: '2026-09-29T12:00:08Z',
+    stages: ['transfer_created', state === 'completed' ? 'checksum_verified' : `transfer_${state}`]
+      .map((stage, index) => ({ stage, created_at: `2026-09-29T12:00:0${index}Z` })),
+    remote_path: '/secret/file', connection_id: 'private-connection', content: 'secret bytes',
+  })
+  const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve(url.endsWith('/file-transfers')
+    ? { ok: available, json: async () => [transfer('completed', 'backup.zip'), transfer('failed', 'config.txt'),
+      transfer('cancelled', '/secret/leaked.txt'), { ...transfer('completed', 'old.txt'), id: 'old', stages: [] }] }
+    : { ok: true, json: async () => url.endsWith('/sessions') ? [] : result }))
+  vi.stubGlobal('fetch', fetcher)
+  render(<Diagnostics admin />)
+  const section = await screen.findByRole('region', { name: 'Recent file transfers' })
+  await waitFor(() => expect(section.textContent).toContain('backup.zip'))
+  expect(section.textContent).toContain('Download')
+  expect(section.textContent).toContain('Upload')
+  expect(section.textContent).toContain('Former PROD-DC01')
+  expect(section.textContent).toContain('SHA-256 verified')
+  expect(section.textContent).toContain('Permission denied')
+  expect(section.textContent).toContain('Transfer cancelled')
+  expect(section.textContent).toContain('No detailed trace available for this older transfer.')
+  expect(section.querySelector('summary')?.textContent).not.toContain('completed-transfer-id')
+  expect(section.textContent).not.toContain('/secret')
+  expect(section.textContent).not.toContain('private-connection')
+  expect(section.textContent).not.toContain('secret bytes')
+  available = false
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+  expect(await screen.findByText('File transfer diagnostics unavailable.')).toBeTruthy()
+  expect(section.textContent).toContain('backup.zip')
+  expect(screen.getByText('Jump API')).toBeTruthy()
+  expect(screen.getByRole('region', { name: 'Recent remote sessions' })).toBeTruthy()
+  available = true
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+  await waitFor(() => expect(screen.queryByText('File transfer diagnostics unavailable.')).toBeNull())
+  expect(fetcher.mock.calls.filter(([url]) => url === '/api/diagnostics/file-transfers')).toHaveLength(3)
 })

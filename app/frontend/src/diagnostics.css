@@ -23,9 +23,13 @@
 .diagnostics-session>summary::-webkit-details-marker{display:none}
 .diagnostics-session>summary time,.diagnostics-session>summary>span:last-child{color:#a3a8ae}
 .diagnostics-state{text-transform:capitalize;color:#a3a8ae}.diagnostics-state.active{color:#50b889}.diagnostics-state.failed{color:#db6868}
+.diagnostics-state.completed{color:#50b889}.diagnostics-state.cancelled{color:#d3a2a2}
+.diagnostics-transfer>summary{grid-template-columns:minmax(100px,1fr) 75px minmax(90px,1fr) 80px 110px 45px}
+.diagnostics-transfer>summary strong{overflow-wrap:anywhere}
 .diagnostics-trace{padding:4px 20px 16px 32px;border-top:1px solid #292b2e}
 .diagnostics-trace>div{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:12px;padding:7px 0}
 .diagnostics-trace>div time,.diagnostics-trace dt{color:#858b92}
 .diagnostics-trace dl{display:flex;gap:12px 24px;flex-wrap:wrap;margin:14px 0 0;border-top:1px solid #292b2e;padding-top:12px;overflow-wrap:anywhere}
 .diagnostics-trace dd{margin:4px 0 0}
 @media(max-width:700px){.diagnostics-session>summary{grid-template-columns:minmax(0,1fr) 40px 65px;gap:8px}.diagnostics-session>summary time{grid-column:1/2}}
+@media(max-width:700px){.diagnostics-transfer>summary{grid-template-columns:minmax(0,1fr) 65px 75px}.diagnostics-transfer>summary>span:nth-child(3){grid-column:1/2}.diagnostics-transfer>summary time{grid-column:2/3}}
