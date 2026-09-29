@@ -45,7 +45,7 @@ def create_credential(
         AuditEvent(
             event_type="credential_created",
             actor_user_id=actor.id,
-            detail={"credential_id": str(item.id)},
+            detail={"credential_id": str(item.id), "kind": item.kind, "label": item.label},
         )
     )
     db.commit()

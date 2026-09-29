@@ -33,6 +33,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
+from .audit import safe_detail
 from .config import settings
 from .credentials import create_credential, decrypt_for_gateway
 from .db import get_db
@@ -1166,14 +1167,49 @@ def revoke(token_id: uuid.UUID, user: User = Depends(admin), db: Session = Depen
 
 @app.get("/api/audit")
 def audit(user: User = Depends(admin), db: Session = Depends(get_db)):
-    events = db.scalars(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(100))
+    events = list(
+        db.scalars(
+            select(AuditEvent)
+            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+            .limit(100)
+        )
+    )
+    actor_ids = {e.actor_user_id for e in events if e.actor_user_id}
+    device_ids = {e.device_id for e in events if e.device_id}
+    actors = (
+        {u.id: u for u in db.scalars(select(User).where(User.id.in_(actor_ids)))}
+        if actor_ids
+        else {}
+    )
+    devices = (
+        {d.id: d for d in db.scalars(select(Device).where(Device.id.in_(device_ids)))}
+        if device_ids
+        else {}
+    )
     return [
         {
             "id": e.id,
             "event_type": e.event_type,
             "actor_user_id": e.actor_user_id,
             "device_id": e.device_id,
-            "detail": e.detail,
+            "actor": (
+                {
+                    "name": actors[e.actor_user_id].display_name,
+                    "email": actors[e.actor_user_id].email,
+                }
+                if e.actor_user_id in actors
+                else None
+            ),
+            "device": (
+                {
+                    "id": e.device_id,
+                    "name": devices[e.device_id].display_name or devices[e.device_id].hostname,
+                }
+                if e.device_id in devices
+                else None
+            ),
+            "detail": safe_detail(e.event_type, e.detail),
+            "request_id": e.request_id,
             "created_at": e.created_at,
         }
         for e in events

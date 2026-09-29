@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { WorkspaceSession } from './SessionWorkspace'
+import { filename, labels, reason, type AuditEvent } from './audit-events'
 import './dashboard.css'
 
 export type DashboardDevice = {
@@ -8,25 +9,14 @@ export type DashboardDevice = {
   agent_update: { update_available: boolean; current_version: string; latest_version: string | null;
     update_state: { state: string; failure_reason: string | null; completed_at?: string | null } | null };
 }
-export type DashboardEvent = {
-  id: string; event_type: string; created_at: string; device_id: string | null;
-  detail?: Record<string, unknown> | null;
-}
-
-const labels: Record<string, string> = {
-  ssh_session_started: 'SSH session started', rdp_session_started: 'RDP session started',
-  ssh_session_ended: 'SSH session closed', rdp_session_ended: 'RDP session closed',
-  ssh_session_failed: 'SSH session failed', rdp_session_failed: 'RDP session failed',
-  file_upload_completed: 'Uploaded', file_download_completed: 'Downloaded',
-  file_upload_failed: 'Upload failed', file_download_failed: 'Download failed',
-  agent_update_completed: 'Agent updated', agent_update_failed: 'Agent update failed',
-  device_enrolled: 'Device enrolled', agent_identity_revoked: 'Device revoked',
-}
+export type DashboardEvent = AuditEvent
+const dashboardTypes = new Set([
+  'ssh_session_started', 'rdp_session_started', 'ssh_session_ended', 'rdp_session_ended',
+  'ssh_session_failed', 'rdp_session_failed', 'file_upload_completed', 'file_download_completed',
+  'file_upload_failed', 'file_download_failed', 'agent_update_completed', 'agent_update_failed',
+  'device_enrolled', 'agent_identity_revoked',
+])
 const recent = (date: string) => Date.now() - new Date(date).getTime() < 24 * 60 * 60 * 1000
-const reason = (value: unknown) => typeof value === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(value)
-  ? value.replaceAll('_', ' ') : null
-const filename = (value: unknown) => typeof value === 'string' && value.length <= 180 && !/[\\/\x00-\x1f]/.test(value)
-  ? value : null
 const time = (value: string) => new Date(value).toLocaleString()
 
 export default function Dashboard({ devices, sessions, events, open }: {
@@ -38,7 +28,7 @@ export default function Dashboard({ devices, sessions, events, open }: {
     return () => detach.forEach(unsubscribe => unsubscribe())
   }, [sessions])
   const names = new Map(devices.map(d => [d.id, d.display_name || d.hostname]))
-  const meaningful = events.filter(e => labels[e.event_type]).sort((a, b) =>
+  const meaningful = events.filter(e => dashboardTypes.has(e.event_type)).sort((a, b) =>
     new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).slice(0, 10)
   const issues: { key: string; title: string; device: string; detail?: string; date?: string }[] = []
   for (const d of devices) {
