@@ -212,7 +212,10 @@ class FileTransfer(Base):
     __tablename__ = "file_transfers"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    device_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"))
+    device_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("devices.id", ondelete="SET NULL"), nullable=True
+    )
+    device_name: Mapped[str | None] = mapped_column(String(255))
     connection_id: Mapped[str] = mapped_column(String(36))
     direction: Mapped[str] = mapped_column(String(16))
     remote_path: Mapped[str] = mapped_column(String(4096))
@@ -226,6 +229,20 @@ class FileTransfer(Base):
     last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (Index("ix_file_transfers_device", "device_id"),)
+
+
+class FileTransferDiagnosticEvent(Base):
+    __tablename__ = "file_transfer_diagnostic_events"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    transfer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("file_transfers.id", ondelete="CASCADE")
+    )
+    stage: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    __table_args__ = (
+        Index("ix_file_transfer_diagnostic_transfer", "transfer_id"),
+        UniqueConstraint("transfer_id", "stage", name="uq_file_transfer_diagnostic_stage"),
+    )
 
 
 class AuditEvent(Base):

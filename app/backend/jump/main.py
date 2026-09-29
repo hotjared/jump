@@ -38,6 +38,8 @@ from .audit import safe_detail
 from .config import settings
 from .credentials import create_credential, decrypt_for_gateway
 from .db import get_db
+from .file_diagnostics import STAGES as FILE_STAGES
+from .file_diagnostics import record_file_stage
 from .models import (
     AgentIdentity,
     AgentUpdate,
@@ -46,6 +48,7 @@ from .models import (
     Device,
     EnrollmentToken,
     FileTransfer,
+    FileTransferDiagnosticEvent,
     Group,
     QuickConnectPreference,
     RemoteSession,
@@ -319,15 +322,7 @@ def file_record(
 ) -> FileTransfer:
     if len(path) > 4096 or len(filename) > 255 or size is not None and size < 0:
         raise HTTPException(400, "invalid_path")
-    stale = db.scalars(
-        select(FileTransfer).where(
-            FileTransfer.device_id == device.id,
-            FileTransfer.state.in_(("pending", "active")),
-            FileTransfer.last_activity_at < now() - timedelta(minutes=2),
-        )
-    ).all()
-    for old in stale:
-        file_finish(db, old, "failed", "transfer_failed")
+    expire_stale_file_transfers(db, device.id)
     active = db.scalar(
         select(func.count())
         .select_from(FileTransfer)
@@ -339,6 +334,7 @@ def file_record(
         id=uuid.uuid4(),
         user_id=user.id,
         device_id=device.id,
+        device_name=device.display_name or device.hostname,
         connection_id=device.connection_id,
         direction=direction,
         remote_path=path,
@@ -349,6 +345,7 @@ def file_record(
     )
     db.add(transfer)
     if direction in ("upload", "download"):
+        record_file_stage(db, transfer.id, "transfer_created")
         db.add(
             AuditEvent(
                 event_type=f"file_{direction}_started",
@@ -403,6 +400,7 @@ def file_finish(
     transfer.sha256 = digest if state == "completed" else None
     transfer.completed_at = now()
     if transfer.direction in ("upload", "download"):
+        record_file_stage(db, transfer.id, f"transfer_{state}")
         db.add(
             AuditEvent(
                 event_type=f"file_{transfer.direction}_{state}",
@@ -418,6 +416,25 @@ def file_finish(
             )
         )
     db.commit()
+
+
+def expire_stale_file_transfers(db: Session, device_id: uuid.UUID) -> None:
+    stale = db.scalars(
+        select(FileTransfer).where(
+            FileTransfer.device_id == device_id,
+            FileTransfer.state.in_(("pending", "active")),
+            FileTransfer.last_activity_at < now() - timedelta(minutes=2),
+        )
+    ).all()
+    removed_list = False
+    for transfer in stale:
+        if transfer.direction == "list":
+            db.delete(transfer)
+            removed_list = True
+        else:
+            file_finish(db, transfer, "failed", "transfer_failed")
+    if removed_list:
+        db.commit()
 
 
 def file_progress(db: Session, transfer: FileTransfer, count: int, force: bool = False) -> None:
@@ -587,6 +604,7 @@ async def upload_file(
     socket = None
     try:
         socket = await file_socket(transfer)
+        record_file_stage(db, transfer.id, "broker_connected")
         await socket.send(
             json.dumps(
                 {
@@ -603,6 +621,7 @@ async def upload_file(
         opened = await file_receive(socket, transfer)
         if opened.get("type") != "file_opened":
             raise RuntimeError("transfer_failed")
+        record_file_stage(db, transfer.id, "agent_opened")
         file_progress(db, transfer, 0, force=True)
         async for block in request.stream():
             for start in range(0, len(block), FILE_CHUNK):
@@ -619,11 +638,15 @@ async def upload_file(
                         }
                     )
                 )
+                if count == 0 and chunk:
+                    record_file_stage(db, transfer.id, "streaming_started")
                 ack = await file_receive(socket, transfer)
                 if ack.get("type") != "file_opened" or ack.get("size") != count + len(chunk):
                     raise RuntimeError("transfer_failed")
                 digest.update(chunk)
                 count += len(chunk)
+                if count == size:
+                    record_file_stage(db, transfer.id, "final_chunk_acknowledged")
                 file_progress(db, transfer, count)
         if count != size:
             raise RuntimeError("transfer_failed")
@@ -631,12 +654,12 @@ async def upload_file(
             json.dumps({"version": 1, "type": "file_finish", "transfer_id": str(transfer.id)})
         )
         result = await file_receive(socket, transfer)
-        if (
-            result.get("type") != "file_finished"
-            or result.get("size") != count
-            or result.get("sha256") != digest.hexdigest()
-        ):
+        if result.get("type") != "file_finished":
             raise RuntimeError("transfer_failed")
+        record_file_stage(db, transfer.id, "agent_finished")
+        if result.get("size") != count or result.get("sha256") != digest.hexdigest():
+            raise RuntimeError("transfer_failed")
+        record_file_stage(db, transfer.id, "checksum_verified")
         file_progress(db, transfer, count, force=True)
         file_finish(db, transfer, "completed", digest=digest.hexdigest())
         return file_output(transfer)
@@ -661,6 +684,7 @@ async def download_file(
     socket = None
     try:
         socket = await file_socket(transfer)
+        record_file_stage(db, transfer.id, "broker_connected")
         await socket.send(
             json.dumps(
                 {
@@ -678,6 +702,7 @@ async def download_file(
             or opened["size"] < 0
         ):
             raise RuntimeError("transfer_failed")
+        record_file_stage(db, transfer.id, "agent_opened")
         file_progress(db, transfer, 0, force=True)
         transfer.expected_size = opened["size"]
         db.commit()
@@ -693,13 +718,16 @@ async def download_file(
         count = 0
 
         def finish(frame: dict) -> None:
+            if frame.get("type") != "file_finished":
+                raise RuntimeError("transfer_failed")
+            record_file_stage(db, transfer.id, "agent_finished")
             if (
-                frame.get("type") != "file_finished"
-                or frame.get("size") != count
+                frame.get("size") != count
                 or frame.get("sha256") != digest.hexdigest()
                 or count != transfer.expected_size
             ):
                 raise RuntimeError("transfer_failed")
+            record_file_stage(db, transfer.id, "checksum_verified")
             file_progress(db, transfer, count, force=True)
             file_finish(db, transfer, "completed", digest=digest.hexdigest())
 
@@ -716,6 +744,8 @@ async def download_file(
                     raise RuntimeError("transfer_failed")
                 digest.update(data)
                 count += len(data)
+                if count == len(data):
+                    record_file_stage(db, transfer.id, "streaming_started")
                 file_progress(db, transfer, count)
                 final = count == transfer.expected_size
                 if not final:
@@ -724,6 +754,7 @@ async def download_file(
                     json.dumps({"version": 1, "type": "file_ack", "transfer_id": str(transfer.id)})
                 )
                 if final:
+                    record_file_stage(db, transfer.id, "final_chunk_acknowledged")
                     finish(await file_receive(socket, transfer))
                     yield data
                     return
@@ -884,6 +915,65 @@ def diagnostic_sessions(user: User = Depends(admin), db: Session = Depends(get_d
             "stages": stages[session.id],
         }
         for session in sessions
+    ]
+
+
+@app.get("/api/diagnostics/file-transfers")
+def diagnostic_file_transfers(user: User = Depends(admin), db: Session = Depends(get_db)):
+    transfers = db.scalars(
+        select(FileTransfer)
+        .where(FileTransfer.direction.in_(("upload", "download")))
+        .order_by(FileTransfer.created_at.desc(), FileTransfer.id.desc())
+        .limit(20)
+    ).all()
+    if not transfers:
+        return []
+    ids = [transfer.id for transfer in transfers]
+    devices = {
+        device.id: device.display_name or device.hostname
+        for device in db.scalars(
+            select(Device).where(
+                Device.id.in_({transfer.device_id for transfer in transfers if transfer.device_id})
+            )
+        )
+    }
+    events = db.scalars(
+        select(FileTransferDiagnosticEvent)
+        .where(FileTransferDiagnosticEvent.transfer_id.in_(ids))
+        .order_by(FileTransferDiagnosticEvent.created_at, FileTransferDiagnosticEvent.id)
+    ).all()
+    stages = {transfer_id: [] for transfer_id in ids}
+    for event in events:
+        if event.stage in FILE_STAGES:
+            stages[event.transfer_id].append({"stage": event.stage, "created_at": event.created_at})
+    return [
+        {
+            "id": transfer.id,
+            "direction": transfer.direction,
+            "state": transfer.state
+            if transfer.state in {"pending", "active", "completed", "failed", "cancelled"}
+            else "failed",
+            # A filename is display-only; older rows may contain path separators.
+            "filename": (
+                safe_name
+                if (safe_name := transfer.filename.replace("\\", "/").rsplit("/", 1)[-1])
+                and not any(ord(char) < 32 or ord(char) == 127 for char in safe_name)
+                else "Unnamed file"
+            ),
+            "device": {
+                "id": transfer.device_id,
+                "name": devices.get(transfer.device_id) or transfer.device_name or "Deleted device",
+            },
+            "expected_size": transfer.expected_size,
+            "transferred_bytes": transfer.transferred_bytes,
+            "failure_reason": transfer.failure_reason
+            if transfer.failure_reason in FILE_CODES
+            else None,
+            "created_at": transfer.created_at,
+            "completed_at": transfer.completed_at,
+            "stages": stages[transfer.id],
+        }
+        for transfer in transfers
     ]
 
 
@@ -1193,6 +1283,13 @@ def delete_device(
         )
     ):
         raise HTTPException(409, "Close active sessions before deleting this device")
+    expire_stale_file_transfers(db, device_id)
+    if db.scalar(
+        select(FileTransfer.id).where(
+            FileTransfer.device_id == device_id, FileTransfer.state.in_(("pending", "active"))
+        )
+    ):
+        raise HTTPException(409, "Finish active file transfers before deleting this device")
 
     former = {
         "device_id": str(item.id),

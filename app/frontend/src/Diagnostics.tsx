@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { label, reason, safeDetails, type AuditEvent } from './audit-events'
+import { filename as safeFilename, label, reason, safeDetails, type AuditEvent } from './audit-events'
 import './diagnostics.css'
 
 type Component = { status: 'healthy' | 'unavailable' | 'unknown'; detail: string }
@@ -11,6 +11,18 @@ type RemoteSessionTrace = {
   device: { id: string | null; name: string }; created_at: string; attached_at: string | null;
   closed_at: string | null; failure_reason: string | null; request_id: string | null;
   stages: { stage: string; created_at: string }[];
+}
+type FileTransferTrace = {
+  id: string; direction: 'upload' | 'download'; state: 'pending' | 'active' | 'completed' | 'failed' | 'cancelled';
+  filename: string; device: { id: string | null; name: string }; expected_size: number | null;
+  transferred_bytes: number; failure_reason: string | null; created_at: string; completed_at: string | null;
+  stages: { stage: string; created_at: string }[];
+}
+const fileStageLabels: Record<string, string> = {
+  transfer_created: 'Transfer created', broker_connected: 'Broker route opened', agent_opened: 'Agent opened file',
+  streaming_started: 'Streaming started', final_chunk_acknowledged: 'Final chunk acknowledged',
+  agent_finished: 'Agent finished', checksum_verified: 'SHA-256 verified',
+  transfer_completed: 'Transfer completed', transfer_failed: 'Transfer failed', transfer_cancelled: 'Transfer cancelled',
 }
 const stageLabels: Record<string, string> = {
   session_created: 'Session created', browser_attached: 'Browser attached', broker_connected: 'Broker route opened',
@@ -44,8 +56,10 @@ export default function Diagnostics({ admin }: { admin: boolean }) {
   const [error, setError] = useState(false)
   const [sessions, setSessions] = useState<RemoteSessionTrace[]>([])
   const [sessionsError, setSessionsError] = useState(false)
+  const [transfers, setTransfers] = useState<FileTransferTrace[]>([])
+  const [transfersError, setTransfersError] = useState(false)
   const refresh = useCallback(async (signal?: AbortSignal) => {
-    setBusy(true); setError(false); setSessionsError(false)
+    setBusy(true); setError(false); setSessionsError(false); setTransfersError(false)
     try {
       await Promise.all([
         (async () => {
@@ -66,6 +80,16 @@ export default function Diagnostics({ admin }: { admin: boolean }) {
             if (!signal?.aborted) setSessions(recent)
           } catch {
             if (!signal?.aborted) setSessionsError(true)
+          }
+        })(),
+        (async () => {
+          try {
+            const response = await fetch('/api/diagnostics/file-transfers', { credentials: 'same-origin', signal })
+            if (!response.ok) throw new Error('File transfer diagnostics request failed')
+            const recent = await response.json() as FileTransferTrace[]
+            if (!signal?.aborted) setTransfers(recent)
+          } catch {
+            if (!signal?.aborted) setTransfersError(true)
           }
         })(),
       ])
@@ -121,6 +145,30 @@ export default function Diagnostics({ admin }: { admin: boolean }) {
               </div>
             </details>
           }) : !sessionsError && <div className="empty">No recent remote sessions.</div>}
+        </section>
+        <section className="panel diagnostics-panel" aria-label="Recent file transfers"><h2>Recent File Transfers</h2>
+          {transfersError && <p role="status" className="diagnostics-note">File transfer diagnostics unavailable.</p>}
+          {transfers.length ? transfers.map(transfer => {
+            const failure = transfer.failure_reason === 'transfer_cancelled' ? 'Transfer cancelled' : reason(transfer.failure_reason)
+            return <details className="diagnostics-session diagnostics-transfer" key={transfer.id}>
+              <summary><strong>{safeFilename(transfer.filename) || 'Unnamed file'}</strong><span>{transfer.direction === 'upload' ? 'Upload' : 'Download'}</span>
+                <span>{transfer.device?.name || 'Deleted device'}</span>
+                <span className={`diagnostics-state ${transfer.state}`}>{transfer.state}</span>
+                <time dateTime={transfer.created_at}>{clock(transfer.created_at)}</time>
+                <span>{duration(transfer.created_at, transfer.completed_at)}</span></summary>
+              <div className="diagnostics-trace">
+                {transfer.stages.length ? transfer.stages.filter(item => item.stage in fileStageLabels).map((item, index) =>
+                  <div key={`${item.stage}-${index}`}><span aria-hidden="true">{item.stage === 'transfer_failed' || item.stage === 'transfer_cancelled' ? '✕' : '✓'}</span>
+                    <span>{item.stage === 'transfer_failed' || item.stage === 'transfer_cancelled' ? failure || fileStageLabels[item.stage] : fileStageLabels[item.stage]}</span>
+                    <time dateTime={item.created_at}>{clock(item.created_at)}</time></div>
+                ) : <p>No detailed trace available for this older transfer.</p>}
+                <dl><div><dt>Transfer ID</dt><dd>{transfer.id}</dd></div>
+                  <div><dt>Size / transferred</dt><dd>{transfer.expected_size ?? '—'} / {transfer.transferred_bytes} bytes</dd></div>
+                  {failure && <div><dt>Failure reason</dt><dd>{failure}</dd></div>}
+                </dl>
+              </div>
+            </details>
+          }) : !transfersError && <div className="empty">No recent file transfers.</div>}
         </section>
         <section className="panel diagnostics-panel" aria-label="Recent failures"><h2>Recent Failures</h2>
           {result.recent_failures.length ? result.recent_failures.map(event => {

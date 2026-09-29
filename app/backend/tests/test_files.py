@@ -10,7 +10,23 @@ from test_api import as_user, write_headers
 
 from jump import main
 from jump.db import get_db
-from jump.models import AgentIdentity, AuditEvent, Device, FileTransfer, Role
+from jump.models import (
+    AgentIdentity,
+    AuditEvent,
+    Device,
+    FileTransfer,
+    FileTransferDiagnosticEvent,
+    Role,
+)
+
+
+def stages(db, transfer_id):
+    return [
+        event.stage
+        for event in db.query(FileTransferDiagnosticEvent)
+        .filter_by(transfer_id=transfer_id)
+        .order_by(FileTransferDiagnosticEvent.created_at, FileTransferDiagnosticEvent.id)
+    ]
 
 
 @pytest.fixture
@@ -133,6 +149,16 @@ def test_listing_and_streamed_upload_audit(client, db, monkeypatch):
     assert sockets[-1].received == payload
     assert len([m for m in sockets[-1].sent if m["type"] == "file_chunk"]) > 1
     assert uploaded.json()["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert stages(db, uuid.UUID(uploaded.json()["id"])) == [
+        "transfer_created",
+        "broker_connected",
+        "agent_opened",
+        "streaming_started",
+        "final_chunk_acknowledged",
+        "agent_finished",
+        "checksum_verified",
+        "transfer_completed",
+    ]
     events = db.query(AuditEvent).filter(AuditEvent.event_type == "file_upload_completed").all()
     assert len(events) == 1
     assert payload.decode() not in json.dumps(events[0].detail)
@@ -191,6 +217,78 @@ def test_transfer_claim_and_owner_scope(client, db):
     )
 
 
+def test_upload_open_failure_has_no_stream_or_ack(client, db, monkeypatch):
+    as_user(client, db)
+    target = device(db)
+    sockets = []
+
+    class DeniedSocket(Socket):
+        async def recv(self):
+            return json.dumps(
+                {
+                    "version": 1,
+                    "transfer_id": self.id,
+                    "type": "file_error",
+                    "code": "permission_denied",
+                    "message": "private path and arbitrary exception",
+                }
+            )
+
+    async def socket(transfer):
+        result = DeniedSocket(transfer)
+        sockets.append(result)
+        return result
+
+    monkeypatch.setattr(main, "file_socket", socket)
+    result = client.post(
+        f"/api/devices/{target.id}/files/upload",
+        params={"path": "/private", "filename": "file", "size": 4},
+        content=b"data",
+        headers={**write_headers(), "Content-Type": "application/octet-stream"},
+    )
+    assert result.status_code == 409
+    assert result.json()["detail"] == "permission_denied"
+    transfer = db.get(FileTransfer, uuid.UUID(sockets[0].id))
+    assert stages(db, transfer.id) == ["transfer_created", "broker_connected", "transfer_failed"]
+    assert "private path" not in json.dumps(main.diagnostic_file_transfers(None, db), default=str)
+
+
+def test_upload_bad_final_ack_never_marks_verified(client, db, monkeypatch):
+    as_user(client, db)
+    target = device(db)
+    sockets = []
+
+    class BadAckSocket(Socket):
+        async def recv(self):
+            if self.sent[-1]["type"] == "file_chunk":
+                return json.dumps(
+                    {"version": 1, "transfer_id": self.id, "type": "file_opened", "size": 0}
+                )
+            return await super().recv()
+
+    async def socket(transfer):
+        result = BadAckSocket(transfer)
+        sockets.append(result)
+        return result
+
+    monkeypatch.setattr(main, "file_socket", socket)
+    result = client.post(
+        f"/api/devices/{target.id}/files/upload",
+        params={"path": "/tmp", "filename": "file", "size": 4},
+        content=b"data",
+        headers={**write_headers(), "Content-Type": "application/octet-stream"},
+    )
+    assert result.status_code == 409
+    trace = stages(db, uuid.UUID(sockets[0].id))
+    assert trace == [
+        "transfer_created",
+        "broker_connected",
+        "agent_opened",
+        "streaming_started",
+        "transfer_failed",
+    ]
+
+
 def test_download_stream_and_safe_header(client, db, monkeypatch):
     as_user(client, db)
     target = device(db)
@@ -231,6 +329,17 @@ def test_download_stream_and_safe_header(client, db, monkeypatch):
     )
     assert result.status_code == 200, result.text
     assert result.content == payload
+    transfer_id = uuid.UUID(result.headers["x-transfer-id"])
+    assert stages(db, transfer_id) == [
+        "transfer_created",
+        "broker_connected",
+        "agent_opened",
+        "streaming_started",
+        "final_chunk_acknowledged",
+        "agent_finished",
+        "checksum_verified",
+        "transfer_completed",
+    ]
     assert result.headers["content-length"] == str(len(payload))
     assert "filename*=UTF-8''back%5Cslash" in result.headers["content-disposition"]
     assert len([frame for frame in sockets[0].sent if frame["type"] == "file_ack"]) == 2
@@ -310,6 +419,11 @@ def test_final_download_chunk_is_verified_before_yield(client, db, monkeypatch):
         events.append("yielded")
         transfer = db.get(FileTransfer, uuid.UUID(sockets[0].id))
         assert transfer.state == "completed"
+        assert stages(db, transfer.id)[-3:] == [
+            "agent_finished",
+            "checksum_verified",
+            "transfer_completed",
+        ]
         # A browser can stop consuming as soon as it gets Content-Length bytes.
         await stream.aclose()
         assert sockets[0].closed
@@ -354,6 +468,8 @@ def test_download_cancel_before_verification_fails(client, db, monkeypatch):
 
     asyncio.run(consume())
     assert db.get(FileTransfer, uuid.UUID(sockets[0].id)).state == "failed"
+    assert "checksum_verified" not in stages(db, uuid.UUID(sockets[0].id))
+    assert "final_chunk_acknowledged" not in stages(db, uuid.UUID(sockets[0].id))
     assert db.query(AuditEvent).filter_by(event_type="file_download_failed").count() == 1
     assert db.query(AuditEvent).filter_by(event_type="file_download_completed").count() == 0
 
@@ -401,6 +517,7 @@ def test_download_final_integrity_failure(client, db, monkeypatch, invalid):
     asyncio.run(consume())
     assert sockets[0].closed
     assert db.get(FileTransfer, uuid.UUID(sockets[0].id)).state == "failed"
+    assert "checksum_verified" not in stages(db, uuid.UUID(sockets[0].id))
     assert db.query(AuditEvent).filter_by(event_type="file_download_completed").count() == 0
 
 
@@ -436,6 +553,8 @@ def test_zero_byte_download_completes(client, db, monkeypatch):
     assert response.headers["content-length"] == "0"
     assert [frame["type"] for frame in sockets[0].sent] == ["file_download_open"]
     assert db.get(FileTransfer, uuid.UUID(sockets[0].id)).state == "completed"
+    assert "streaming_started" not in stages(db, uuid.UUID(sockets[0].id))
+    assert "final_chunk_acknowledged" not in stages(db, uuid.UUID(sockets[0].id))
 
 
 def test_directory_claim_is_ephemeral_on_success_and_failure(client, db, monkeypatch):
@@ -541,6 +660,7 @@ def test_cancel_owner_audit_and_idempotence(client, db, monkeypatch):
     assert first.status_code == 200, first.text
     assert first.json()["state"] == "cancelled"
     assert first.json()["failure_reason"] == "transfer_cancelled"
+    assert stages(db, transfer.id) == ["transfer_created", "transfer_cancelled"]
     assert calls[0][0].endswith(f"/internal/file-streams/{transfer.id}/cancel")
     assert calls[0][1]["json"] == {"device_id": str(target.id), "user_id": str(owner.id)}
     assert client.post(cancel_url, headers=write_headers()).json()["state"] == "cancelled"
