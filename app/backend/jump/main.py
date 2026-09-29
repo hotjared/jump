@@ -322,15 +322,7 @@ def file_record(
 ) -> FileTransfer:
     if len(path) > 4096 or len(filename) > 255 or size is not None and size < 0:
         raise HTTPException(400, "invalid_path")
-    stale = db.scalars(
-        select(FileTransfer).where(
-            FileTransfer.device_id == device.id,
-            FileTransfer.state.in_(("pending", "active")),
-            FileTransfer.last_activity_at < now() - timedelta(minutes=2),
-        )
-    ).all()
-    for old in stale:
-        file_finish(db, old, "failed", "transfer_failed")
+    expire_stale_file_transfers(db, device.id)
     active = db.scalar(
         select(func.count())
         .select_from(FileTransfer)
@@ -424,6 +416,25 @@ def file_finish(
             )
         )
     db.commit()
+
+
+def expire_stale_file_transfers(db: Session, device_id: uuid.UUID) -> None:
+    stale = db.scalars(
+        select(FileTransfer).where(
+            FileTransfer.device_id == device_id,
+            FileTransfer.state.in_(("pending", "active")),
+            FileTransfer.last_activity_at < now() - timedelta(minutes=2),
+        )
+    ).all()
+    removed_list = False
+    for transfer in stale:
+        if transfer.direction == "list":
+            db.delete(transfer)
+            removed_list = True
+        else:
+            file_finish(db, transfer, "failed", "transfer_failed")
+    if removed_list:
+        db.commit()
 
 
 def file_progress(db: Session, transfer: FileTransfer, count: int, force: bool = False) -> None:
@@ -1272,6 +1283,7 @@ def delete_device(
         )
     ):
         raise HTTPException(409, "Close active sessions before deleting this device")
+    expire_stale_file_transfers(db, device_id)
     if db.scalar(
         select(FileTransfer.id).where(
             FileTransfer.device_id == device_id, FileTransfer.state.in_(("pending", "active"))

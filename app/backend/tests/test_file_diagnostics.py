@@ -7,14 +7,22 @@ from types import SimpleNamespace
 import pytest
 from alembic.config import Config
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event, text
-from test_api import as_user
+from sqlalchemy import create_engine, event, select, text
+from test_api import as_user, write_headers
 
 from alembic import command
 from jump import main
 from jump.db import Base, get_db
 from jump.file_diagnostics import record_file_stage
-from jump.models import Device, FileTransfer, FileTransferDiagnosticEvent, Role, now
+from jump.models import (
+    AgentIdentity,
+    AuditEvent,
+    Device,
+    FileTransfer,
+    FileTransferDiagnosticEvent,
+    Role,
+    now,
+)
 
 
 @pytest.fixture
@@ -120,6 +128,110 @@ def test_deleted_device_retains_history_and_old_snapshot_fallback(client, db):
     assert {row["device"]["name"] for row in data} == {"Former hostname", "Deleted device"}
     assert all(row["device"]["id"] is None for row in data)
     assert all(row["stages"] == [] for row in data)
+
+
+def seeded_transfer(db, user, direction, state, stale):
+    device = Device(
+        hostname="former-server", display_name="Former server", os_family="linux", online=False
+    )
+    db.add(device)
+    db.flush()
+    db.add(
+        AgentIdentity(
+            device_id=device.id,
+            public_key=uuid.uuid4().bytes + uuid.uuid4().bytes,
+            revoked_at=now(),
+        )
+    )
+    transfer = FileTransfer(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        device_id=device.id,
+        device_name="Former server",
+        connection_id="private-connection",
+        direction=direction,
+        remote_path="/private/secret/file.txt",
+        filename="file.txt",
+        state=state,
+        last_activity_at=now() - timedelta(minutes=3 if stale else 1),
+    )
+    db.add(transfer)
+    db.flush()
+    if direction != "list":
+        record_file_stage(db, transfer.id, "transfer_created")
+    db.commit()
+    return device.id, transfer.id
+
+
+@pytest.mark.parametrize("direction,state", [("upload", "pending"), ("download", "active")])
+def test_stale_transfer_does_not_block_device_deletion(client, db, direction, state):
+    user = as_user(client, db, Role.ADMIN)
+    device_id, transfer_id = seeded_transfer(db, user, direction, state, stale=True)
+    response = client.delete(f"/api/devices/{device_id}", headers=write_headers())
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True}
+    db.expire_all()
+    transfer = db.get(FileTransfer, transfer_id)
+    assert transfer.device_id is None
+    assert transfer.state == "failed"
+    assert transfer.failure_reason == "transfer_failed"
+    assert transfer.completed_at is not None
+    assert [
+        stage.stage
+        for stage in db.scalars(
+            select(FileTransferDiagnosticEvent)
+            .where(FileTransferDiagnosticEvent.transfer_id == transfer_id)
+            .order_by(FileTransferDiagnosticEvent.created_at, FileTransferDiagnosticEvent.id)
+        )
+    ] == ["transfer_created", "transfer_failed"]
+    assert (
+        len(
+            db.scalars(
+                select(AuditEvent).where(AuditEvent.event_type == f"file_{direction}_failed")
+            ).all()
+        )
+        == 1
+    )
+    data = client.get("/api/diagnostics/file-transfers").json()
+    assert data[0]["device"] == {"id": None, "name": "Former server"}
+    assert data[0]["failure_reason"] == "transfer_failed"
+    assert [stage["stage"] for stage in data[0]["stages"]] == [
+        "transfer_created",
+        "transfer_failed",
+    ]
+    assert all(
+        secret not in json.dumps(data) for secret in ("/private", "private-connection", "secret")
+    )
+
+
+def test_stale_list_claim_is_removed_before_deletion(client, db):
+    user = as_user(client, db, Role.ADMIN)
+    device_id, transfer_id = seeded_transfer(db, user, "list", "pending", stale=True)
+    response = client.delete(f"/api/devices/{device_id}", headers=write_headers())
+    assert response.status_code == 200, response.text
+    assert db.get(FileTransfer, transfer_id) is None
+    assert (
+        db.scalars(
+            select(FileTransferDiagnosticEvent).where(
+                FileTransferDiagnosticEvent.transfer_id == transfer_id
+            )
+        ).all()
+        == []
+    )
+    assert client.get("/api/diagnostics/file-transfers").json() == []
+
+
+@pytest.mark.parametrize(
+    "direction,state", [("upload", "active"), ("download", "active"), ("list", "pending")]
+)
+def test_recent_transfer_still_blocks_deletion(client, db, direction, state):
+    user = as_user(client, db, Role.ADMIN)
+    device_id, transfer_id = seeded_transfer(db, user, direction, state, stale=False)
+    response = client.delete(f"/api/devices/{device_id}", headers=write_headers())
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Finish active file transfers before deleting this device"
+    assert db.get(Device, device_id) is not None
+    assert db.get(FileTransfer, transfer_id).state == state
 
 
 def test_event_rows_cascade_with_transfer(tmp_path):
