@@ -1,6 +1,7 @@
 import base64
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .releases import valid_release_tag
@@ -10,6 +11,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+psycopg://jump:jump@localhost:5432/jump"
+    auth_mode: str = "oidc"
     oidc_issuer: str = ""
     oidc_client_id: str = ""
     oidc_client_secret: str = ""
@@ -29,18 +31,37 @@ class Settings(BaseSettings):
     jump_agent_version: str = ""
     ssh_idle_seconds: int = 1800
 
+    @field_validator("auth_mode")
+    @classmethod
+    def valid_auth_mode(cls, value: str) -> str:
+        if value not in ("oidc", "local", "hybrid"):
+            raise ValueError("AUTH_MODE must be oidc, local, or hybrid")
+        return value
+
+    @property
+    def oidc_enabled(self) -> bool:
+        return self.auth_mode in ("oidc", "hybrid")
+
+    @property
+    def local_enabled(self) -> bool:
+        return self.auth_mode in ("local", "hybrid")
+
     def validate_production(self) -> None:
         if self.jump_agent_version and not valid_release_tag(self.jump_agent_version):
             raise RuntimeError("JUMP_AGENT_VERSION must be a version tag such as v0.1.0")
-        for name in (
-            "oidc_issuer",
-            "oidc_client_id",
-            "oidc_client_secret",
-            "oidc_redirect_uri",
+        names = (
             "session_secret",
             "broker_internal_token",
             "jump_master_key",
-        ):
+        )
+        if self.oidc_enabled:
+            names = (
+                "oidc_issuer",
+                "oidc_client_id",
+                "oidc_client_secret",
+                "oidc_redirect_uri",
+            ) + names
+        for name in names:
             if not getattr(self, name):
                 raise RuntimeError(f"{name.upper()} must be configured")
             if getattr(self, name).startswith("REPLACE_"):

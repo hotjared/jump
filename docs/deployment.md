@@ -1,5 +1,29 @@
 # Deployment and operations
 
+## Authentication modes
+
+Set one of the following in `.env`:
+
+```dotenv
+AUTH_MODE=oidc
+```
+
+This is the default. It requires all four OIDC settings and does not expose the local password login endpoint. OIDC is recommended when you already have an identity provider.
+
+```dotenv
+AUTH_MODE=local
+```
+
+This enables username/password sign-in without an external IdP; leave the OIDC settings blank. OIDC login and callback are disabled.
+
+```dotenv
+AUTH_MODE=hybrid
+```
+
+This offers both methods and requires all four OIDC settings. Accounts are separate; matching emails do not link them. Existing OIDC users suppress the local bootstrap screen, and this release has no user-management UI for adding further local users. Switching an existing OIDC installation to `local` will not create a local admin automatically.
+
+For a new empty local or hybrid installation, open the login page once, then read the one-time token from `docker compose logs jump`. Enter it in the setup form with a username, display name, and password of at least 12 characters. The token is stored only as a SHA-256 hash and is consumed when the first administrator is created. There are no default credentials or public registration. Keep container logs private. If setup was interrupted and the token is lost, remove the pending `local_setup` row from PostgreSQL and reload the login page to issue a new token; never delete user records for this. Local auth does not include MFA in this release.
+
 ## OIDC
 
 Register a confidential web application at your OIDC provider. Use authorization-code flow and the exact redirect URI in `OIDC_REDIRECT_URI`. Ensure the issuer URL publishes standard discovery and JWKS metadata. For Microsoft Entra, choose an issuer for the desired tenant; Jump does not hardcode Entra. Enforce MFA and permitted users at the provider. The first user to complete sign-in becomes Jump admin, so configure provider access before first launch.
@@ -29,7 +53,7 @@ docker compose up -d
 docker compose logs jump broker
 ```
 
-The Jump container runs `alembic upgrade head` before serving; subsequent starts repeat this safely. PostgreSQL data remains in the `postgres_data` named volume across image updates, including devices, audit events, credentials, and enrollment history. Open the UI and complete OIDC sign-in.
+The Jump container runs `alembic upgrade head` before serving; subsequent starts repeat this safely. PostgreSQL data remains in the `postgres_data` named volume across image updates, including devices, audit events, credentials, and enrollment history. Open the UI and sign in or complete local setup.
 
 ## GHCR packages
 

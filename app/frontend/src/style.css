@@ -72,3 +72,4 @@
 *::-webkit-scrollbar-track{background:#17191b}
 *::-webkit-scrollbar-thumb{background:#4b5056;border-radius:8px;border:2px solid #17191b}
 *::-webkit-scrollbar-thumb:hover{background:#626870}
+.login-card{width:min(410px,calc(100vw - 30px))}.login-form{display:grid;gap:15px;text-align:left;margin:24px 0}.login-form label{display:grid;gap:7px;color:#d9dbde;font-size:12px}.login-form input{width:100%}.login-form button{width:100%;margin-top:5px}.login-divider{color:#999fa6;font-size:12px;margin:18px 0}.login-card>a.button{display:block}

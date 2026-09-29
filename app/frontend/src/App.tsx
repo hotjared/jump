@@ -10,6 +10,7 @@ import Notice, { type NoticeMessage } from './Notice'
 import Dashboard, { type DashboardEvent } from './Dashboard'
 import AuditLog from './AuditLog'
 import Diagnostics from './Diagnostics'
+import LoginScreen, { type AuthConfig } from './LoginScreen'
 const TerminalPanel = lazy(() => import('./TerminalPanel'))
 const RemotePanel = lazy(() => import('./RemotePanel'))
 const SessionWorkspace = lazy(() => import('./SessionWorkspace'))
@@ -56,6 +57,7 @@ export function filterDevices(devices: Device[], query: string, status: string, 
 export default function App() {
   const [user, setUser] = useState<User | null>(null)
   const [authPending, setAuthPending] = useState(true)
+  const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null)
   const [page, setPage] = useState<Page>('Devices')
   const [sessions, setSessions] = useState<WorkspaceSession[]>([])
   const [quickPreferences, setQuickPreferences] = useState<QuickPreference[]>([])
@@ -98,7 +100,7 @@ export default function App() {
       setUser(u); setAuthPending(false)
       if (u.role === 'admin') get<QuickPreference[]>('/api/quick-connect-preferences').then(setQuickPreferences).catch(() => setError('Could not load Quick Connect settings.'))
       return refresh(u.role === 'admin')
-    }).catch(() => setAuthPending(false))
+    }).catch(() => get<AuthConfig>('/api/auth/config').then(setAuthConfig).catch(() => setError('Could not load sign-in settings.')).finally(() => setAuthPending(false)))
   }, [])
   useEffect(() => {
     if (!user) return
@@ -172,7 +174,7 @@ export default function App() {
     </div>
   }
   if (authPending) return <main className="center">Loading Jump…</main>
-  if (!user) return <main className="login"><div className="login-card"><div className="logo large">J<span>↗</span></div><h1>Your servers, one place.</h1><p>Secure access begins with your identity provider.</p><a className="button primary" href="/auth/login">Sign in with SSO</a></div></main>
+  if (!user) return authConfig ? <LoginScreen config={authConfig} /> : <main className="center" role="alert">{error || 'Could not load sign-in settings.'}</main>
 
   return <div className="layout">
     <aside className="sidebar">

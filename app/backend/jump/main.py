@@ -26,6 +26,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -40,6 +41,7 @@ from .credentials import create_credential, decrypt_for_gateway
 from .db import get_db
 from .file_diagnostics import STAGES as FILE_STAGES
 from .file_diagnostics import record_file_stage
+from .local_auth import authenticate_local, create_first_admin, ensure_setup_token, setup_required
 from .models import (
     AgentIdentity,
     AgentUpdate,
@@ -88,13 +90,14 @@ cfg = settings()
 cfg.validate_production()
 app = FastAPI(title="Jump", docs_url=None, redoc_url=None)
 oauth = OAuth()
-oauth.register(
-    name="provider",
-    client_id=cfg.oidc_client_id,
-    client_secret=cfg.oidc_client_secret,
-    server_metadata_url=cfg.oidc_issuer.rstrip("/") + "/.well-known/openid-configuration",
-    client_kwargs={"scope": "openid profile email"},
-)
+if cfg.oidc_enabled:
+    oauth.register(
+        name="provider",
+        client_id=cfg.oidc_client_id,
+        client_secret=cfg.oidc_client_secret,
+        server_metadata_url=cfg.oidc_issuer.rstrip("/") + "/.well-known/openid-configuration",
+        client_kwargs={"scope": "openid profile email"},
+    )
 
 
 @app.middleware("http")
@@ -815,20 +818,74 @@ def health():
 
 @app.get("/auth/login")
 async def login(request: Request):
+    if not cfg.oidc_enabled:
+        raise HTTPException(404)
     return await oauth.provider.authorize_redirect(request, cfg.oidc_redirect_uri)
 
 
 @app.get("/auth/callback")
 async def callback(request: Request, db: Session = Depends(get_db)):
+    if not cfg.oidc_enabled:
+        raise HTTPException(404)
     token = await oauth.provider.authorize_access_token(request)
     claims = token.get("userinfo")
     if not claims:
         raise HTTPException(401, "OIDC userinfo missing")
     user = map_oidc_user(db, cfg.oidc_issuer, claims)
+    establish_session(request, user)
+    return RedirectResponse("/", status_code=303)
+
+
+def establish_session(request: Request, user: User) -> None:
     request.session.clear()
     request.session["uid"] = str(user.id)
     request.session["csrf"] = secrets.token_urlsafe(32)
-    return RedirectResponse("/", status_code=303)
+
+
+class LocalLoginInput(BaseModel):
+    username: str
+    password: str
+
+
+class LocalSetupInput(LocalLoginInput):
+    token: str
+    display_name: str
+    password_confirmation: str
+
+
+@app.get("/api/auth/config")
+def auth_config(request: Request, db: Session = Depends(get_db)):
+    if "csrf" not in request.session:
+        request.session["csrf"] = secrets.token_urlsafe(32)
+    required = cfg.local_enabled and setup_required(db)
+    if required:
+        ensure_setup_token(db)
+    return {
+        "oidc_enabled": cfg.oidc_enabled,
+        "local_enabled": cfg.local_enabled,
+        "setup_required": required,
+        "csrf": request.session["csrf"],
+    }
+
+
+@app.post("/api/auth/local/login")
+def local_login(data: LocalLoginInput, request: Request, db: Session = Depends(get_db)):
+    if not cfg.local_enabled:
+        raise HTTPException(404)
+    user = authenticate_local(db, data.username, data.password)
+    establish_session(request, user)
+    return {"ok": True}
+
+
+@app.post("/api/auth/local/setup")
+def local_setup(data: LocalSetupInput, request: Request, db: Session = Depends(get_db)):
+    if not cfg.local_enabled:
+        raise HTTPException(404)
+    user = create_first_admin(
+        db, data.token, data.username, data.display_name, data.password, data.password_confirmation
+    )
+    establish_session(request, user)
+    return {"ok": True}
 
 
 @app.post("/api/logout")
