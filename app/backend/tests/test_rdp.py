@@ -279,9 +279,7 @@ def test_rdp_websocket_requires_guacamole_subprotocol_before_claim(client, db):
 
 
 def test_agent_update_blocked_while_rdp_active(client, db, monkeypatch):
-    from jump.main import cfg
-
-    monkeypatch.setattr(cfg, "jump_agent_version", "v0.1.1")
+    monkeypatch.setattr("jump.main.latest_agent_release", lambda: "v0.1.1")
     device = seed(db, capabilities=["rdp_tunnel_v1", "agent_update_v1"])
     as_user(client, db)
     cred = credential(client, device)

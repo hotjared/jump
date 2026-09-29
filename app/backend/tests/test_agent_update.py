@@ -10,7 +10,7 @@ from test_api import BROKER, ORIGIN, as_user, write_headers
 
 from jump import releases
 from jump.db import get_db
-from jump.main import app, cfg
+from jump.main import app
 from jump.models import (
     AgentIdentity,
     AgentUpdate,
@@ -50,7 +50,7 @@ def seed(db, *, capabilities=None):
 
 
 def test_semantic_versions_and_manual_bootstrap(client, db, monkeypatch):
-    monkeypatch.setattr(cfg, "jump_agent_version", "v0.1.10")
+    monkeypatch.setattr("jump.main.latest_agent_release", lambda: "v0.1.10")
     assert newer_release("v0.1.9", "v0.1.10")
     assert not newer_release("v0.2.0", "v0.1.10")
     assert not newer_release("dev", "v0.1.10")
@@ -78,7 +78,7 @@ def test_semantic_versions_and_manual_bootstrap(client, db, monkeypatch):
 
 
 def test_update_authorization_conflicts_and_lifecycle(client, db, monkeypatch):
-    monkeypatch.setattr(cfg, "jump_agent_version", "v0.1.3")
+    monkeypatch.setattr("jump.main.latest_agent_release", lambda: "v0.1.3")
     device = seed(db)
     path = f"/api/devices/{device.id}/agent-update"
     assert client.post(path).status_code == 403
@@ -203,8 +203,52 @@ def test_update_authorization_conflicts_and_lifecycle(client, db, monkeypatch):
     assert "agent_update_completed" in [e.event_type for e in db.scalars(select(AuditEvent))]
 
 
+def test_update_pins_single_resolved_target(client, db, monkeypatch):
+    device = seed(db)
+    as_user(client, db)
+    resolved = []
+
+    def latest():
+        resolved.append(True)
+        return "v0.1.3" if len(resolved) == 1 else "v0.1.4"
+
+    monkeypatch.setattr("jump.main.latest_agent_release", latest)
+    assets = []
+
+    def asset(version, platform):
+        assets.append((version, platform))
+        return {
+            "version": version,
+            "platform": platform,
+            "architecture": "amd64",
+            "download_url": f"https://github.com/hotjared/jump/releases/download/{version}/jump-agent-linux-amd64",
+            "sha256": "a" * 64,
+        }
+
+    monkeypatch.setattr("jump.main.release_asset", asset)
+    sent = []
+    original_post = httpx.Client.post
+
+    def post(self, url, **kwargs):
+        if str(url).endswith("/agent-update") and str(url).startswith("http://broker"):
+            sent.append(kwargs["json"])
+            return Mock(status_code=204, raise_for_status=lambda: None)
+        return original_post(self, url, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "post", post)
+    response = client.post(f"/api/devices/{device.id}/agent-update", headers=write_headers())
+    assert response.status_code == 201, response.text
+    assert len(resolved) == 1
+    assert assets == [("v0.1.3", "linux")]
+    assert sent[0]["version"] == "v0.1.3"
+    op = db.get(AgentUpdate, uuid.UUID(response.json()["id"]))
+    assert op.target_version == "v0.1.3"
+    audit = db.scalar(select(AuditEvent).where(AuditEvent.event_type == "agent_update_started"))
+    assert audit.detail["target_version"] == "v0.1.3"
+
+
 def test_rollback_and_timeout(client, db, monkeypatch):
-    monkeypatch.setattr(cfg, "jump_agent_version", "v0.1.3")
+    monkeypatch.setattr("jump.main.latest_agent_release", lambda: "v0.1.3")
     device = seed(db)
     user = as_user(client, db)
     op = AgentUpdate(

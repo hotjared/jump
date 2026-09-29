@@ -60,7 +60,7 @@ from .models import (
     now,
 )
 from .rdp import instruction, rdp_gateway
-from .releases import agent_downloads, newer_release, release_asset, release_number
+from .releases import agent_downloads, latest_agent_release, newer_release, release_asset
 from .schemas import (
     CredentialInput,
     CredentialUpdate,
@@ -240,7 +240,7 @@ def latest_update(db: Session, device_id: uuid.UUID) -> AgentUpdate | None:
 
 
 def serialize_device(device: Device, db: Session | None = None) -> dict:
-    latest = cfg.jump_agent_version
+    latest = latest_agent_release()
     available = (
         newer_release(device.agent_version, latest)
         and device.os_family in ("linux", "windows")
@@ -258,7 +258,7 @@ def serialize_device(device: Device, db: Session | None = None) -> dict:
         "agent_version": device.agent_version,
         "agent_update": {
             "current_version": device.agent_version,
-            "latest_version": latest if release_number(latest) else None,
+            "latest_version": latest,
             "update_available": available,
             "remote_update_supported": "agent_update_v1" in device.capabilities,
             "update_state": update_output(op) if op else None,
@@ -909,7 +909,7 @@ def me(request: Request, user: User = Depends(current_user)):
 def system_info(user: User = Depends(current_user)):
     return {
         "server_version": cfg.jump_server_version,
-        "target_agent_version": cfg.jump_agent_version or None,
+        "target_agent_version": latest_agent_release(),
     }
 
 
@@ -1172,7 +1172,8 @@ def request_agent_update(
         raise HTTPException(409, "Unsupported agent platform")
     if "agent_update_v1" not in device.capabilities:
         raise HTTPException(409, "This agent must be updated manually once")
-    if not newer_release(device.agent_version, cfg.jump_agent_version):
+    target_version = latest_agent_release()
+    if not target_version or not newer_release(device.agent_version, target_version):
         raise HTTPException(409, "No newer supported agent release")
     if latest := latest_update(db, device.id):
         if latest.state in UPDATE_ACTIVE:
@@ -1188,14 +1189,14 @@ def request_agent_update(
     if active:
         raise HTTPException(409, "Close active sessions before updating this agent")
     try:
-        asset = release_asset(cfg.jump_agent_version, device.os_family)
+        asset = release_asset(target_version, device.os_family)
     except (ValueError, httpx.HTTPError) as exc:
         raise HTTPException(503, "Agent release metadata unavailable") from exc
     op = AgentUpdate(
         device_id=device.id,
         actor_user_id=user.id,
         from_version=device.agent_version,
-        target_version=cfg.jump_agent_version,
+        target_version=target_version,
         connection_id=device.connection_id,
     )
     db.add(op)
@@ -1478,7 +1479,7 @@ def delete_tag(tag_id: uuid.UUID, user: User = Depends(admin), db: Session = Dep
 
 @app.get("/api/agent-downloads")
 def download_links(user: User = Depends(admin)):
-    return agent_downloads(cfg.jump_server_version, cfg.jump_agent_version)
+    return agent_downloads(latest_agent_release())
 
 
 @app.post("/api/enrollment-tokens")

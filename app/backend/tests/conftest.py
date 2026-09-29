@@ -19,6 +19,12 @@ from jump import models  # noqa: F401
 from jump.db import Base
 
 
+@pytest.fixture(autouse=True)
+def no_live_release_lookup(monkeypatch):
+    """API tests must explicitly choose a target; never query GitHub by accident."""
+    monkeypatch.setattr("jump.main.latest_agent_release", lambda: None)
+
+
 @pytest.fixture
 def db():
     engine = create_engine(
