@@ -20,8 +20,12 @@ FIELDS = {
         for state in ("started", "completed", "failed")
     },
     **{f"credential_{state}": ("label", "kind") for state in ("created", "updated", "deleted")},
-    "group_created": ("name",),
-    "tag_created": ("name",),
+    "device_deleted": ("display_name", "hostname"),
+    **{
+        f"{kind}_{action}": ("name",)
+        for kind in ("group", "tag")
+        for action in ("created", "updated", "deleted")
+    },
 }
 IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{0,79}\Z")
 UUID = re.compile(r"[a-fA-F0-9]{8}-[a-fA-F0-9-]{0,28}[a-fA-F0-9]\Z")
@@ -44,7 +48,16 @@ def safe_detail(event_type: str, detail: dict | None) -> dict:
                 result[key] = value
             elif key == "fingerprint" and FINGERPRINT.fullmatch(value):
                 result[key] = value
-            elif key in ("filename", "label", "name", "kind", "from_version", "target_version"):
+            elif key in (
+                "filename",
+                "label",
+                "name",
+                "kind",
+                "from_version",
+                "target_version",
+                "display_name",
+                "hostname",
+            ):
                 if 0 < len(value) <= 180 and not re.search(r"[\\/\x00-\x1f\x7f]", value):
                     result[key] = value
     return result

@@ -53,19 +53,22 @@ const fieldsFor = (type: string) => {
   if (/^agent_update_(started|completed|failed)$/.test(type)) return ['from_version', 'target_version', 'reason', 'operation_id']
   if (/^credential_(created|updated|deleted)$/.test(type)) return ['label', 'kind']
   if (type === 'ssh_host_key_trusted') return ['fingerprint', 'session_id']
-  if (type === 'group_created' || type === 'tag_created') return ['name']
+  if (/^(group|tag)_(created|updated|deleted)$/.test(type)) return ['name']
+  if (type === 'device_deleted') return ['display_name', 'hostname']
   return []
 }
 const fieldLabels: Record<string, string> = {
   reason: 'Reason', session_id: 'Session ID', filename: 'Filename', size: 'Size (bytes)',
   transfer_id: 'Transfer ID', from_version: 'From version', target_version: 'Target version',
   operation_id: 'Operation ID', label: 'Label', kind: 'Kind', fingerprint: 'Fingerprint', name: 'Name',
+  display_name: 'Display name', hostname: 'Hostname',
 }
 export function safeDetails(event: AuditEvent): { key: string; name: string; value: string }[] {
   const detail = event.detail || {}
   return fieldsFor(event.event_type).flatMap(key => {
     const value = detail[key]
     const safe = key === 'reason' ? reason(value) : key === 'filename' ? filename(value) :
+      key === 'fingerprint' ? (typeof value === 'string' && /^SHA256:[A-Za-z0-9+/=]{20,64}$/.test(value) ? value : null) :
       key === 'size' ? (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? String(value) : null) :
       typeof value === 'string' && value.length > 0 && value.length <= 180 && !/[\\/\x00-\x1f\x7f]/.test(value) ? value : null
     return safe ? [{ key, name: fieldLabels[key], value: safe }] : []
@@ -79,6 +82,6 @@ export function summary(event: AuditEvent) {
   const subtitle = event.event_type.endsWith('_failed')
     ? [file, get('reason')].filter(Boolean).join(' · ')
     : event.event_type.startsWith('agent_update_') && get('from_version') && get('target_version')
-      ? `${get('from_version')} → ${get('target_version')}` : get('label') || undefined
+      ? `${get('from_version')} → ${get('target_version')}` : get('label') || get('name') || undefined
   return { title, subtitle }
 }

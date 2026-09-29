@@ -8,7 +8,10 @@ const categories = [
   ['security', 'Security & access'], ['organization', 'Organization'], ['other', 'Other'],
 ]
 const actorName = (event: AuditEvent) => event.actor?.name || (event.actor_user_id ? 'Deleted user' : 'System')
-const deviceName = (event: AuditEvent) => event.device?.name || (event.device_id || event.event_type === 'device_deleted' ? 'Deleted device' : '—')
+const deviceName = (event: AuditEvent) => event.device?.name ||
+  (event.event_type === 'device_deleted'
+    ? safeDetails(event).find(d => d.key === 'display_name')?.value || safeDetails(event).find(d => d.key === 'hostname')?.value || 'Deleted device'
+    : event.device_id ? 'Deleted device' : '—')
 
 export default function AuditLog({ events, admin }: { events: AuditEvent[]; admin: boolean }) {
   const [query, setQuery] = useState('')

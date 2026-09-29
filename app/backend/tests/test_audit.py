@@ -151,3 +151,53 @@ def test_audit_deleted_context_and_rejects_unstructured_reason(client, db):
     data = client.get("/api/audit").json()[0]
     assert data["actor"] is None and data["device"] is None
     assert data["detail"] == {}
+
+
+def test_deleted_device_name_and_fingerprint_are_allowlisted(client, db):
+    login(client, db, Role.ADMIN)
+    fingerprint = "SHA256:" + "A" * 42 + "/"
+    db.add_all(
+        [
+            AuditEvent(
+                event_type="device_deleted",
+                detail={
+                    "display_name": "Former PROD-DC01",
+                    "hostname": "prod-dc01",
+                    "device_id": str(uuid.uuid4()),
+                    "device_uuid": str(uuid.uuid4()),
+                    "remote_path": "/private/secret",
+                    "password": "secret-value",
+                },
+            ),
+            AuditEvent(
+                event_type="ssh_host_key_trusted",
+                detail={"fingerprint": fingerprint, "private_key": "secret-key"},
+            ),
+        ]
+    )
+    db.commit()
+    by_type = {e["event_type"]: e for e in client.get("/api/audit").json()}
+    assert by_type["device_deleted"]["detail"] == {
+        "display_name": "Former PROD-DC01",
+        "hostname": "prod-dc01",
+    }
+    assert by_type["device_deleted"]["device"] is None
+    assert by_type["ssh_host_key_trusted"]["detail"] == {"fingerprint": fingerprint}
+    assert "secret-value" not in str(by_type)
+    assert "secret-key" not in str(by_type)
+    assert "/private/secret" not in str(by_type)
+
+
+@pytest.mark.parametrize("kind", ["group", "tag"])
+def test_organization_update_and_delete_record_names(client, db, kind):
+    login(client, db, Role.ADMIN)
+    headers = {"Origin": "http://localhost:8000", "X-CSRF-Token": "test-csrf"}
+    created = client.post(f"/api/{kind}s", json={"name": "Original"}, headers=headers)
+    assert created.status_code == 200
+    path = f"/api/{kind}s/{created.json()['id']}"
+    assert client.put(path, json={"name": "Renamed"}, headers=headers).status_code == 200
+    assert client.delete(path, headers=headers).status_code == 200
+    by_type = {e["event_type"]: e for e in client.get("/api/audit").json()}
+    assert by_type[f"{kind}_updated"]["detail"] == {"name": "Renamed"}
+    assert by_type[f"{kind}_deleted"]["detail"] == {"name": "Renamed"}
+    assert by_type[f"{kind}_created"]["detail"] == {"name": "Original"}

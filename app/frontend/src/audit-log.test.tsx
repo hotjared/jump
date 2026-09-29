@@ -74,3 +74,30 @@ it('handles empty, unknown, malformed and non-admin states without raw detail', 
   expect(screen.getByText('Admin access required.')).toBeTruthy()
   expect(screen.queryByRole('region', { name: 'Audit activity' })).toBeNull()
 })
+
+it('uses the former device name and organization names, and shows valid SSH fingerprints', () => {
+  const fingerprint = `SHA256:${'A'.repeat(42)}/`
+  const deleted = { ...event('deleted', 'device_deleted', {
+    display_name: 'Former PROD-DC01', hostname: 'prod-dc01', device_uuid: 'secret-uuid',
+    remote_path: '/private/secret', password: 'secret-password',
+  }), device_id: null, device: null }
+  const hostnameOnly = { ...event('hostname-only', 'device_deleted', { hostname: 'legacy01' }), device_id: null, device: null }
+  const updates = ['group_updated', 'group_deleted', 'tag_updated', 'tag_deleted'].map((type, i) =>
+    event(`org-${i}`, type, { name: `${type} name`, id: 'hidden-id', token: 'secret-token' }))
+  const historical = event('historical', 'group_updated', { id: 'old-id' })
+  const trusted = event('trust', 'ssh_host_key_trusted', { fingerprint, private_key: 'secret-key' })
+  show([deleted, hostnameOnly, ...updates, historical, trusted])
+  expect(rows()[0].textContent).toContain('Former PROD-DC01')
+  expect(rows()[1].textContent).toContain('legacy01')
+  for (const [i, type] of ['group_updated', 'group_deleted', 'tag_updated', 'tag_deleted'].entries()) {
+    expect(rows()[i + 2].textContent).toContain(`${type} name`)
+  }
+  expect(rows()[6].textContent).toContain('Group updated')
+  fireEvent.click(screen.getByRole('button', { name: 'Expand Device deleted on Former PROD-DC01' }))
+  expect(document.querySelector('.audit-details')?.textContent).toContain('Former PROD-DC01')
+  fireEvent.click(screen.getByRole('button', { name: /Expand SSH host key trusted/ }))
+  expect(document.querySelector('.audit-details')?.textContent).toContain(fingerprint)
+  for (const secret of ['secret-uuid', '/private/secret', 'secret-password', 'hidden-id', 'secret-token', 'secret-key']) {
+    expect(document.body.textContent).not.toContain(secret)
+  }
+})

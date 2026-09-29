@@ -1074,7 +1074,11 @@ def rename_group(
         raise HTTPException(404)
     item.name = body.name.strip()
     db.add(
-        AuditEvent(event_type="group_updated", actor_user_id=user.id, detail={"id": str(group_id)})
+        AuditEvent(
+            event_type="group_updated",
+            actor_user_id=user.id,
+            detail={"id": str(group_id), "name": item.name},
+        )
     )
     db.commit()
     return {"id": item.id, "name": item.name}
@@ -1087,7 +1091,11 @@ def delete_group(group_id: uuid.UUID, user: User = Depends(admin), db: Session =
         raise HTTPException(404)
     db.delete(item)
     db.add(
-        AuditEvent(event_type="group_deleted", actor_user_id=user.id, detail={"id": str(group_id)})
+        AuditEvent(
+            event_type="group_deleted",
+            actor_user_id=user.id,
+            detail={"id": str(group_id), "name": item.name},
+        )
     )
     db.commit()
     return {"ok": True}
@@ -1118,7 +1126,13 @@ def rename_tag(
     if not item:
         raise HTTPException(404)
     item.name = body.name.strip()
-    db.add(AuditEvent(event_type="tag_updated", actor_user_id=user.id, detail={"id": str(tag_id)}))
+    db.add(
+        AuditEvent(
+            event_type="tag_updated",
+            actor_user_id=user.id,
+            detail={"id": str(tag_id), "name": item.name},
+        )
+    )
     db.commit()
     return {"id": item.id, "name": item.name}
 
@@ -1129,7 +1143,13 @@ def delete_tag(tag_id: uuid.UUID, user: User = Depends(admin), db: Session = Dep
     if not item:
         raise HTTPException(404)
     db.delete(item)
-    db.add(AuditEvent(event_type="tag_deleted", actor_user_id=user.id, detail={"id": str(tag_id)}))
+    db.add(
+        AuditEvent(
+            event_type="tag_deleted",
+            actor_user_id=user.id,
+            detail={"id": str(tag_id), "name": item.name},
+        )
+    )
     db.commit()
     return {"ok": True}
 
