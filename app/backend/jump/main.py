@@ -848,7 +848,9 @@ def diagnostic_sessions(user: User = Depends(admin), db: Session = Depends(get_d
     devices = {
         device.id: device.display_name or device.hostname
         for device in db.scalars(
-            select(Device).where(Device.id.in_({session.device_id for session in sessions}))
+            select(Device).where(
+                Device.id.in_({session.device_id for session in sessions if session.device_id})
+            )
         )
     }
     events = db.scalars(
@@ -870,7 +872,7 @@ def diagnostic_sessions(user: User = Depends(admin), db: Session = Depends(get_d
             else "failed",
             "device": {
                 "id": session.device_id,
-                "name": devices.get(session.device_id, "Deleted device"),
+                "name": devices.get(session.device_id) or session.device_name or "Deleted device",
             },
             "created_at": session.created_at,
             "attached_at": session.attached_at,
@@ -1841,6 +1843,7 @@ def new_ssh_session(
     session = RemoteSession(
         id=uuid.uuid4(),
         device_id=device_id,
+        device_name=device.display_name or device.hostname,
         user_id=user.id,
         credential_id=credential.id,
         columns=body.columns,
@@ -1885,6 +1888,7 @@ def new_rdp_session(
     session = RemoteSession(
         id=uuid.uuid4(),
         device_id=device_id,
+        device_name=device.display_name or device.hostname,
         user_id=user.id,
         credential_id=credential.id,
         protocol="rdp",

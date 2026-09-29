@@ -152,7 +152,10 @@ class QuickConnectPreference(Base):
 class RemoteSession(Base):
     __tablename__ = "remote_sessions"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    device_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"))
+    device_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("devices.id", ondelete="SET NULL"), nullable=True
+    )
+    device_name: Mapped[str | None] = mapped_column(String(255))
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     credential_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("credentials.id", ondelete="SET NULL"), nullable=True

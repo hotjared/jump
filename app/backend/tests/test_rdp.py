@@ -127,6 +127,7 @@ def test_rdp_authorization_capability_credential_and_lifecycle(client, db):
     assert "do-not-expose-me" not in response.text
     session = db.get(RemoteSession, uuid.UUID(response.json()["id"]))
     assert session.protocol == "rdp" and session.user_id == user.id and session.dpi == 96
+    assert session.device_name == device.hostname
     session.state = "active"
     db.commit()
     finish_remote_session(db, session, "browser_disconnected")

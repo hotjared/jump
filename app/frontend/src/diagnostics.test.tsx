@@ -64,3 +64,42 @@ it('shows SSH and RDP traces with IDs only in expanded details', async () => {
   expect(section.textContent).not.toContain('do-not-render')
   expect(section.textContent).not.toContain('private-connection')
 })
+
+it('keeps core diagnostics visible when session traces fail and retries both on Refresh', async () => {
+  let tracesAvailable = false
+  const trace = { id: 'session-1', protocol: 'ssh', state: 'closed', device: { id: null, name: 'Former docker01' },
+    created_at: '2026-09-29T12:00:00Z', attached_at: null, closed_at: '2026-09-29T12:00:03Z',
+    failure_reason: null, request_id: null, stages: [{ stage: 'session_created', created_at: '2026-09-29T12:00:00Z' }] }
+  const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve(url.endsWith('/sessions')
+    ? { ok: tracesAvailable, json: async () => [trace] }
+    : { ok: true, json: async () => result }))
+  vi.stubGlobal('fetch', fetcher)
+  render(<Diagnostics admin />)
+  expect(await screen.findByText('Jump API')).toBeTruthy()
+  expect(await screen.findByText('Session diagnostics unavailable.')).toBeTruthy()
+  expect(screen.getByText('PROD-DC01')).toBeTruthy()
+  expect(screen.queryByText('Could not refresh diagnostics.')).toBeNull()
+  tracesAvailable = true
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+  expect(await screen.findByText('Former docker01')).toBeTruthy()
+  expect(screen.queryByText('Session diagnostics unavailable.')).toBeNull()
+  expect(fetcher).toHaveBeenCalledTimes(4)
+  expect(fetcher.mock.calls.filter(([url]) => url === '/api/diagnostics')).toHaveLength(2)
+  expect(fetcher.mock.calls.filter(([url]) => url === '/api/diagnostics/sessions')).toHaveLength(2)
+})
+
+it('keeps the last core result and shows the page error when core refresh fails', async () => {
+  let coreAvailable = true
+  const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve(url.endsWith('/sessions')
+    ? { ok: true, json: async () => [] }
+    : { ok: coreAvailable, json: async () => result }))
+  vi.stubGlobal('fetch', fetcher)
+  render(<Diagnostics admin />)
+  expect(await screen.findByText('Jump API')).toBeTruthy()
+  coreAvailable = false
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Could not refresh diagnostics. Showing the last check.')
+  expect(screen.getByText('Jump API')).toBeTruthy()
+  expect(screen.queryByText('Session diagnostics unavailable.')).toBeNull()
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(4))
+})

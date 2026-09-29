@@ -116,6 +116,7 @@ def test_session_authorization_validation_and_host_trust(client, db):
     assert "super-private-password" not in response.text
     session = db.get(RemoteSession, uuid.UUID(response.json()["id"]))
     assert session.user_id == user.id and session.credential_id == uuid.UUID(cred)
+    assert session.device_name == device.hostname
     assert trust_ssh_host_key(db, session, "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     assert device.ssh_host_key == "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     assert trust_ssh_host_key(db, session, "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
