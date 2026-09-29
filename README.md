@@ -2,7 +2,7 @@
 
 Browser RDP setup and limitations: [Browser RDP (Phase 2)](docs/browser-rdp.md).
 
-Jump is a self-hosted remote access foundation for a single environment. It provides OIDC sign-in, device enrollment, persistent outbound agent presence, device organization, audit events, RDP, files and browser SSH terminals on Linux.
+Jump is a self-hosted remote access foundation for a single environment. It provides OIDC or local sign-in, device enrollment, persistent outbound agent presence, device organization, audit events, RDP, files and browser SSH terminals on Linux.
 
 ## Components
 
@@ -25,15 +25,17 @@ Screenshots use illustrative device data:
 ## Quick start
 
 1. Download [`docker-compose.yml`](docker-compose.yml) and [`.env.example`](.env.example) into a directory on the Jump host; no source checkout is needed. Copy `.env.example` to `.env`. Generate independent secrets: `openssl rand -hex 32` for the database password, session secret and broker internal token, and `openssl rand -base64 32` for `JUMP_MASTER_KEY`. Back up the master key separately.
-2. Configure an OIDC client with the redirect URI `https://jump.example.com/auth/callback`. Set issuer, client ID and secret in `.env`. Set your real HTTPS URLs and allowed hostname.
+2. Choose `AUTH_MODE=oidc` (default), `AUTH_MODE=local`, or `AUTH_MODE=hybrid` in `.env`. For OIDC or hybrid, configure an OIDC client with redirect URI `https://jump.example.com/auth/callback` and set issuer, client ID and secret. Local mode needs no OIDC variables. Set your real HTTPS URLs and allowed hostname.
 3. Set `JUMP_BIND_ADDRESS` to the Jump host's private LAN IP when Nginx Proxy Manager runs on another host. Allow only that NPM host to reach TCP 8000 and 8080 on the Jump host. Configure HTTPS, WebSocket support on the agent host, and the [proxy settings](docs/deployment.md).
 4. Run `docker compose pull && docker compose up -d`. The application applies Alembic migrations before starting. The production Compose file uses `ghcr.io/hotjared/jump` and `ghcr.io/hotjared/jump-broker`; it does not build locally. The repository owner must make both GHCR packages public after their first publication, or the server must authenticate with a read-only package token.
-5. Sign in. **The first successfully authenticated OIDC user becomes admin.** Subsequent users are created with the `user` role. Configure the identity provider to admit only intended users before exposing Jump.
+5. Sign in. With OIDC, **the first successfully authenticated user becomes admin**; configure the provider to admit only intended users before exposing Jump. For an empty local or hybrid installation, open the login page, read the one-time setup token with `docker compose logs jump`, and complete the administrator setup form. There is no default local account. Existing OIDC users suppress local bootstrap in hybrid mode.
 6. In **Devices → Enroll device**, choose an OS, download the native agent, generate a token, and run the displayed enrollment and native service-install commands on the endpoint. The token expires after 15 minutes and is shown once. The installed service keeps the device online after the terminal closes and across reboots.
 
 The agent defaults to `/var/lib/jump-agent/identity.json` on Linux and `%ProgramData%\Jump\identity.json` on Windows. After enrollment, run `service install` from an elevated shell. Linux installs `/usr/local/bin/jump-agent` plus `jump-agent.service`; Windows installs the `JumpAgent` service running as LocalSystem. `service uninstall` removes the service configuration but intentionally preserves the enrolled identity. The foreground `run` command remains available for diagnostics and development. Use `JUMP_AGENT_STATE` to set another path for foreground/development use. The broker only accepts inbound requests through the reverse proxy; endpoints initiate all connections.
 
 For upgrades, rollback, GHCR visibility, and local image builds for development, see [deployment and operations](docs/deployment.md).
+
+OIDC is recommended when you already have an identity provider. Local auth runs without an external IdP. `AUTH_MODE=oidc` does not expose the local password login endpoint. Local passwords do not have MFA in this release; user management and local MFA are planned separately.
 
 Admins can update an older `agent_update_v1` service from its device details when `JUMP_AGENT_VERSION` points to a newer published stable release. Agents installed before this capability need [one manual upgrade](docs/deployment.md#administrator-initiated-agent-updates) first. Jump blocks updates during active SSH sessions.
 

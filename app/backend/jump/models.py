@@ -41,14 +41,29 @@ device_tags = Table(
 class User(Base):
     __tablename__ = "users"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    oidc_issuer: Mapped[str] = mapped_column(String(512))
-    oidc_subject: Mapped[str] = mapped_column(String(512))
+    oidc_issuer: Mapped[str | None] = mapped_column(String(512))
+    oidc_subject: Mapped[str | None] = mapped_column(String(512))
+    local_username: Mapped[str | None] = mapped_column(String(100), unique=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255))
     email: Mapped[str] = mapped_column(String(320))
     display_name: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(20), default=Role.USER)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (UniqueConstraint("oidc_issuer", "oidc_subject"),)
+
+
+class LocalSetup(Base):
+    __tablename__ = "local_setup"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64))
+
+
+class LocalLoginFailure(Base):
+    __tablename__ = "local_login_failures"
+    username: Mapped[str] = mapped_column(String(100), primary_key=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Group(Base):
