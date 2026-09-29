@@ -26,7 +26,8 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -819,6 +820,118 @@ def system_info(user: User = Depends(current_user)):
     return {
         "server_version": cfg.jump_server_version,
         "target_agent_version": cfg.jump_agent_version or None,
+    }
+
+
+DIAGNOSTIC_FAILURES = (
+    "ssh_session_failed",
+    "rdp_session_failed",
+    "file_upload_failed",
+    "file_download_failed",
+    "agent_update_failed",
+)
+
+
+@app.get("/api/diagnostics")
+async def diagnostics(user: User = Depends(admin), db: Session = Depends(get_db)):
+    components = {
+        "api": {"status": "healthy", "detail": "Responding"},
+        "database": {"status": "unavailable", "detail": "Connection failed"},
+        "broker": {"status": "unavailable", "detail": "Not reachable"},
+        "guacd": {"status": "unavailable", "detail": "Not reachable"},
+    }
+    runtime = None
+    failures = []
+    try:
+        db.execute(text("SELECT 1"))
+        components["database"] = {"status": "healthy", "detail": "Connected"}
+        runtime = {
+            "devices_online": db.scalar(
+                select(func.count()).select_from(Device).where(Device.online.is_(True))
+            ),
+            "active_sessions": db.scalar(
+                select(func.count())
+                .select_from(RemoteSession)
+                .where(RemoteSession.state.in_(("connecting", "active")))
+            ),
+            "active_file_transfers": db.scalar(
+                select(func.count())
+                .select_from(FileTransfer)
+                .where(FileTransfer.state.in_(("pending", "active")))
+            ),
+            "active_agent_updates": db.scalar(
+                select(func.count())
+                .select_from(AgentUpdate)
+                .where(AgentUpdate.state.in_(UPDATE_ACTIVE))
+            ),
+        }
+        events = db.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.event_type.in_(DIAGNOSTIC_FAILURES))
+            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+            .limit(10)
+        ).all()
+        ids = {event.device_id for event in events if event.device_id}
+        names = (
+            {
+                device.id: (
+                    safe_detail(
+                        "device_deleted", {"display_name": device.display_name or device.hostname}
+                    ).get("display_name")
+                )
+                for device in db.scalars(select(Device).where(Device.id.in_(ids)))
+            }
+            if ids
+            else {}
+        )
+        failures = [
+            {
+                "id": event.id,
+                "event_type": event.event_type,
+                "created_at": event.created_at,
+                "device_name": names.get(event.device_id),
+                "detail": safe_detail(event.event_type, event.detail),
+                "request_id": event.request_id,
+            }
+            for event in events
+        ]
+    except SQLAlchemyError:
+        db.rollback()
+        components["database"] = {"status": "unavailable", "detail": "Query failed"}
+        runtime = None
+        failures = []
+
+    try:
+        async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
+            response = await client.get(
+                f"{cfg.broker_internal_url.rstrip('/')}/internal/diagnostics",
+                headers={"Authorization": f"Bearer {cfg.broker_internal_token}"},
+            )
+            response.raise_for_status()
+            data = response.json()
+            keys = ("agent_connections", "session_routes", "file_routes", "updates_in_progress")
+            if not isinstance(data, dict) or any(
+                type(data.get(key)) is not int or data[key] < 0 for key in keys
+            ):
+                raise ValueError("Invalid broker diagnostics")
+            broker_runtime = {key: data[key] for key in keys}
+            components["broker"] = {"status": "healthy", "detail": "Reachable"}
+    except (httpx.HTTPError, ValueError):
+        broker_runtime = None
+
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(cfg.guacd_host, cfg.guacd_port), timeout=1.5
+        )
+        writer.close()
+        components["guacd"] = {"status": "healthy", "detail": "TCP reachable"}
+    except (OSError, TimeoutError):
+        pass
+    return {
+        "components": components,
+        "runtime": runtime,
+        "broker_runtime": broker_runtime,
+        "recent_failures": failures,
     }
 
 

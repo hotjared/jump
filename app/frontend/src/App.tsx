@@ -9,6 +9,7 @@ import QuickConnect, { type QuickPreference } from './QuickConnect'
 import Notice, { type NoticeMessage } from './Notice'
 import Dashboard, { type DashboardEvent } from './Dashboard'
 import AuditLog from './AuditLog'
+import Diagnostics from './Diagnostics'
 const TerminalPanel = lazy(() => import('./TerminalPanel'))
 const RemotePanel = lazy(() => import('./RemotePanel'))
 const SessionWorkspace = lazy(() => import('./SessionWorkspace'))
@@ -27,11 +28,11 @@ type Device = {
 type User = { id: string; email: string; display_name: string; role: string; csrf: string }
 type SystemInfo = { server_version: string; target_agent_version: string | null }
 type Event = DashboardEvent
-type Page = 'Dashboard' | 'Devices' | 'Credentials' | 'Support Links' | 'Audit Log' | 'Settings'
+type Page = 'Dashboard' | 'Devices' | 'Credentials' | 'Support Links' | 'Audit Log' | 'Diagnostics' | 'Settings'
 const nav: { page: Page; icon: string }[] = [
   { page: 'Dashboard', icon: '◫' }, { page: 'Devices', icon: '▤' },
   { page: 'Credentials', icon: '◇' },
-  { page: 'Support Links', icon: '↗' }, { page: 'Audit Log', icon: '≡' },
+  { page: 'Support Links', icon: '↗' }, { page: 'Audit Log', icon: '≡' }, { page: 'Diagnostics', icon: '◉' },
   { page: 'Settings', icon: '⚙' },
 ]
 const formatDate = (value: string | null) => value ? new Date(value).toLocaleString() : 'Never'
@@ -218,6 +219,7 @@ export default function App() {
         </>}
         {page === 'Credentials' && <Suspense fallback={null}><CredentialsPage admin={user.role === 'admin'} mutate={mutate} /></Suspense>}
         {page === 'Audit Log' && <AuditLog events={events} admin={user.role === 'admin'} />}
+        {page === 'Diagnostics' && <Diagnostics admin={user.role === 'admin'} />}
         {page === 'Settings' && <><div className="heading"><div><p className="eyebrow">ORGANIZE</p><h1>Settings</h1><p>Groups and tags for a single environment.</p></div></div>
           <div className="settings-grid"><section className="panel settings-panel"><h2>Groups</h2><p>Each device can belong to one group.</p>{groups.map(g => itemRow('groups', g))}
             {user.role === 'admin' && <form onSubmit={e => { e.preventDefault(); action(async () => { await mutate('/api/groups', 'POST', { name: newGroup }); setNewGroup(''); await refresh(true) }) }}><input aria-label="New group" placeholder="Group name" value={newGroup} onChange={e => setNewGroup(e.target.value)} required /><button className="button">Add</button></form>}</section>

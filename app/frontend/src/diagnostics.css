@@ -1,0 +1,19 @@
+.diagnostics{max-width:1050px}
+.diagnostics .heading{margin-bottom:22px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+.diagnostics-panel{margin-bottom:16px}
+.diagnostics-panel h2{font-size:14px;margin:0;padding:16px 20px;border-bottom:1px solid #2b2d30}
+.diagnostics-component{display:grid;grid-template-columns:9px minmax(100px,1fr) minmax(85px,auto) minmax(110px,1fr);gap:14px;align-items:center;min-height:54px;padding:12px 20px;border-bottom:1px solid #292b2e;font-size:12px}
+.diagnostics-component:last-child,.diagnostics-failure:last-child{border-bottom:0}
+.diagnostics-component small,.diagnostics-failure span,.diagnostics-failure small,.diagnostics-failure time,.diagnostics-counts small{color:#a3a8ae}
+.diagnostics-dot{width:8px;height:8px;border-radius:50%;background:#888;flex:none}
+.diagnostics-dot.healthy{background:#50b889}.diagnostics-dot.unavailable{background:#db6868}
+.diagnostics-counts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;padding:16px}
+.diagnostics-counts>div{padding:12px;background:#191b1d;border:1px solid #2b2e31;border-radius:8px}
+.diagnostics-counts small{display:block;font-size:11px}.diagnostics-counts strong{display:block;margin-top:6px;font-size:20px}
+.diagnostics-note,.diagnostics-error{padding:0 20px;color:#d3a2a2;font-size:12px}
+.diagnostics-failure{display:flex;align-items:start;flex-wrap:wrap;gap:10px 20px;padding:14px 20px;border-bottom:1px solid #292b2e;font-size:12px}
+.diagnostics-failure>div:first-child{flex:1;display:grid;gap:5px;min-width:180px}
+.diagnostics-failure time{font-size:11px}.diagnostics-failure details{flex-basis:100%}
+.diagnostics-failure summary{cursor:pointer;color:#a3a8ae}.diagnostics-failure dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;overflow-wrap:anywhere}
+.diagnostics-failure dt{color:#858b92}.diagnostics-failure dd{margin:3px 0 0}
+@media(max-width:700px){.diagnostics-counts{grid-template-columns:repeat(2,minmax(0,1fr))}.diagnostics-component{grid-template-columns:9px minmax(0,1fr) auto;gap:9px}.diagnostics-component small{grid-column:2/4}.diagnostics-failure dl{grid-template-columns:1fr}}
