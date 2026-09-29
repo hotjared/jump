@@ -1016,6 +1016,25 @@ func (b *broker) disconnect(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// diagnostics exposes only aggregate sizes from the private control listener.
+func (b *broker) diagnostics(w http.ResponseWriter, r *http.Request) {
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+b.token)) != 1 || r.Header.Get("Origin") != "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	b.mu.Lock()
+	counts := struct {
+		AgentConnections  int `json:"agent_connections"`
+		SessionRoutes     int `json:"session_routes"`
+		FileRoutes        int `json:"file_routes"`
+		UpdatesInProgress int `json:"updates_in_progress"`
+	}{len(b.active), len(b.sessions), len(b.files), len(b.updating)}
+	b.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(counts)
+}
+
 func randomID() string {
 	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {
@@ -1061,6 +1080,7 @@ func main() {
 	mux.HandleFunc("/enroll", b.enroll)
 	mux.HandleFunc("/connect", b.ws)
 	internalMux := http.NewServeMux()
+	internalMux.HandleFunc("GET /internal/diagnostics", b.diagnostics)
 	internalMux.HandleFunc("POST /internal/devices/{id}/disconnect", b.disconnect)
 	internalMux.HandleFunc("POST /internal/devices/{id}/agent-update", b.agentUpdate)
 	internalMux.HandleFunc("GET /internal/sessions/{id}", b.internalSession)
