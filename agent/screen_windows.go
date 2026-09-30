@@ -240,7 +240,7 @@ func launchDesktop(ctx context.Context) (desktopBridge, error) {
 	var pi windows.ProcessInformation
 	env := windows.StringToUTF16("SystemRoot=" + os.Getenv("SystemRoot"))
 	env = append(env, 0)
-	if windows.CreateProcessAsUser(token, windows.StringToUTF16Ptr(exe), windows.StringToUTF16Ptr(command), nil, nil, false, windows.CREATE_SUSPENDED|windows.CREATE_UNICODE_ENVIRONMENT, &env[0], nil, &si, &pi) != nil {
+	if windows.CreateProcessAsUser(token, windows.StringToUTF16Ptr(exe), windows.StringToUTF16Ptr(command), nil, nil, false, windows.CREATE_SUSPENDED|windows.CREATE_UNICODE_ENVIRONMENT|windows.CREATE_NO_WINDOW, &env[0], nil, &si, &pi) != nil {
 		return nil, errors.New("helper_start_failed")
 	}
 	defer windows.CloseHandle(pi.Process)
