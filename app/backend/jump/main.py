@@ -916,6 +916,7 @@ def system_info(user: User = Depends(current_user)):
 DIAGNOSTIC_FAILURES = (
     "ssh_session_failed",
     "rdp_session_failed",
+    "screen_session_failed",
     "file_upload_failed",
     "file_download_failed",
     "agent_update_failed",
@@ -926,7 +927,7 @@ DIAGNOSTIC_FAILURES = (
 def diagnostic_sessions(user: User = Depends(admin), db: Session = Depends(get_db)):
     sessions = db.scalars(
         select(RemoteSession)
-        .where(RemoteSession.protocol.in_(("ssh", "rdp")))
+        .where(RemoteSession.protocol.in_(("ssh", "rdp", "screen")))
         .order_by(RemoteSession.created_at.desc(), RemoteSession.id.desc())
         .limit(20)
     ).all()
@@ -950,7 +951,9 @@ def diagnostic_sessions(user: User = Depends(admin), db: Session = Depends(get_d
     for event in events:
         if event.stage in STAGES:
             stages[event.session_id].append({"stage": event.stage, "created_at": event.created_at})
-    safe_reasons = set(SSH_ERRORS) | set(RDP_ERRORS)
+    from .screen import ERRORS as SCREEN_ERRORS
+
+    safe_reasons = set(SSH_ERRORS) | set(RDP_ERRORS) | set(SCREEN_ERRORS)
     return [
         {
             "id": session.id,
@@ -2579,6 +2582,11 @@ async def browser_rdp_session(ws: WebSocket, session_id: uuid.UUID, db: Session 
             await ws.close()
         except (RuntimeError, WebSocketDisconnect, OSError):
             pass
+
+
+from .screen import router as screen_router  # noqa: E402
+
+app.include_router(screen_router)
 
 
 static_root = Path("/opt/jump/static")

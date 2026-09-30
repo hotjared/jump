@@ -4,6 +4,8 @@ import { canDeleteDevice, deletionConfirmed, deletionName, deviceDeleteMethod } 
 import AgentUpdatePanel, { type UpdateInfo } from './AgentUpdatePanel'
 import { SshSession } from './ssh-session'
 import { RdpSession } from './rdp-session'
+import { ScreenSession } from './screen-session'
+import ScreenPanel from './ScreenPanel'
 import type { WorkspaceSession } from './SessionWorkspace'
 import QuickConnect, { type QuickPreference } from './QuickConnect'
 import Notice, { type NoticeMessage } from './Notice'
@@ -126,8 +128,8 @@ export default function App() {
 
   function openSession(session: WorkspaceSession, { activate = true } = {}) {
     // A disconnected tab may be replaced by a fresh connection to the same device.
-    sessions.filter(old => old.deviceId === session.deviceId).forEach(old => old.disconnect())
-    setSessions(previous => [...previous.filter(old => old.deviceId !== session.deviceId), session])
+    sessions.filter(old => old.deviceId === session.deviceId && old.protocol === session.protocol).forEach(old => old.disconnect())
+    setSessions(previous => [...previous.filter(old => old.deviceId !== session.deviceId || old.protocol !== session.protocol), session])
     if (activate) { setActiveSessionId(session.id); setSelected(null) }
   }
 
@@ -265,9 +267,11 @@ export default function App() {
             }
           }}>Delete device</button>}
         </section>
-      </div> : tab === 'Remote' ? <Suspense fallback={<div className="placeholder compact">Loading remote desktop…</div>}><RemotePanel key={device.id} device={device} admin={user.role === 'admin'} mutate={mutate}
+      </div> : tab === 'Remote' ? <Suspense fallback={<div className="placeholder compact">Loading remote desktop…</div>}><>{device.os_family === 'windows' && <ScreenPanel device={device} admin={user.role === 'admin'} mutate={mutate} onConnected={openSession}
+        existing={sessions.find((session): session is ScreenSession => session.deviceId === device.id && session.protocol === 'Screen')}
+        openExisting={() => { const session = sessions.find(item => item.deviceId === device.id && item.protocol === 'Screen'); if (session) { setActiveSessionId(session.id); setSelected(null) } }} />}<h3>Remote Desktop (RDP)</h3><RemotePanel key={device.id} device={device} admin={user.role === 'admin'} mutate={mutate}
         existing={sessions.find((session): session is RdpSession => session.deviceId === device.id && session.protocol === 'RDP')} onConnected={openSession}
-        onOpenExisting={() => { const session = sessions.find(item => item.deviceId === device.id && item.protocol === 'RDP'); if (session) { setActiveSessionId(session.id); setSelected(null) } }} /></Suspense>
+        onOpenExisting={() => { const session = sessions.find(item => item.deviceId === device.id && item.protocol === 'RDP'); if (session) { setActiveSessionId(session.id); setSelected(null) } }} /></></Suspense>
       : tab === 'Terminal' ? <Suspense fallback={<div className="placeholder compact">Loading terminal…</div>}><TerminalPanel key={device.id} device={device} admin={user.role === 'admin'} mutate={mutate}
         existing={sessions.find((session): session is SshSession => session.deviceId === device.id && session.protocol === 'SSH')} onConnected={openSession}
         onOpenExisting={() => { const session = sessions.find(item => item.deviceId === device.id); if (session) { setActiveSessionId(session.id); setSelected(null) } }} /></Suspense>

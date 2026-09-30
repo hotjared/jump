@@ -31,6 +31,13 @@ var pingInterval = 25 * time.Second
 var heartbeatTimeout = 65 * time.Second
 
 type message struct {
+	FrameID       uint64          `json:"frame_id,omitempty"`
+	Index         int             `json:"index,omitempty"`
+	Count         int             `json:"count,omitempty"`
+	Width         int             `json:"width,omitempty"`
+	Height        int             `json:"height,omitempty"`
+	Mode          string          `json:"mode,omitempty"`
+	Input         *screenInput    `json:"input,omitempty"`
 	Version       int             `json:"version"`
 	Type          string          `json:"type"`
 	DeviceID      string          `json:"device_id,omitempty"`
@@ -67,16 +74,20 @@ type message struct {
 }
 
 type sessionRoute struct {
-	deviceID     string
-	protocol     string
-	ownerID      string
-	agent        *websocket.Conn
-	frames       chan message
-	closed       chan struct{}
-	once         sync.Once
-	firstClose   atomic.Pointer[string]
-	toAgentBytes atomic.Uint64
-	toJumpBytes  atomic.Uint64
+	screenMu          sync.Mutex
+	screenSeq         screenSequence
+	screenMode        string
+	screenPendingMode string
+	deviceID          string
+	protocol          string
+	ownerID           string
+	agent             *websocket.Conn
+	frames            chan message
+	closed            chan struct{}
+	once              sync.Once
+	firstClose        atomic.Pointer[string]
+	toAgentBytes      atomic.Uint64
+	toJumpBytes       atomic.Uint64
 }
 
 func (r *sessionRoute) markClose(reason string) {
@@ -91,22 +102,23 @@ func (r *sessionRoute) closeReason() string {
 }
 
 type broker struct {
-	api              string
-	token            string
-	client           *http.Client
-	mu               sync.Mutex
-	active           map[string]*websocket.Conn
-	connections      map[string]string
-	capabilities     map[string]bool
-	rdpCapabilities  map[string]bool
-	updates          map[string]*websocket.Conn
-	updating         map[string]bool
-	writers          sync.Map // *websocket.Conn -> *sync.Mutex
-	sessions         map[string]*sessionRoute
-	files            map[string]*sessionRoute
-	fileCapabilities map[string]bool
-	limits           map[string]window
-	wg               sync.WaitGroup
+	api                string
+	token              string
+	client             *http.Client
+	mu                 sync.Mutex
+	active             map[string]*websocket.Conn
+	connections        map[string]string
+	capabilities       map[string]bool
+	screenCapabilities map[string]bool
+	rdpCapabilities    map[string]bool
+	updates            map[string]*websocket.Conn
+	updating           map[string]bool
+	writers            sync.Map // *websocket.Conn -> *sync.Mutex
+	sessions           map[string]*sessionRoute
+	files              map[string]*sessionRoute
+	fileCapabilities   map[string]bool
+	limits             map[string]window
+	wg                 sync.WaitGroup
 }
 
 func (b *broker) write(conn *websocket.Conn, value message) error {
@@ -131,6 +143,9 @@ func (b *broker) closeRoute(id string, route *sessionRoute) {
 }
 
 func (b *broker) agentFrame(conn *websocket.Conn, msg message) bool {
+	if strings.HasPrefix(msg.Type, "screen_") {
+		return b.screenAgentFrame(conn, msg)
+	}
 	if strings.HasPrefix(msg.Type, "file_") {
 		if len(msg.TransferID) != 36 || len(msg.Data) > 44000 || (msg.Type != "file_list_result" && msg.Type != "file_opened" && msg.Type != "file_chunk" && msg.Type != "file_finished" && msg.Type != "file_error") {
 			return false
@@ -840,8 +855,11 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 	if json.Unmarshal(auth.Metadata, &authInfo) != nil {
 		return
 	}
-	updateCapable, rdpCapable, fileCapable := false, false, false
+	updateCapable, rdpCapable, fileCapable, screenCapable := false, false, false, false
 	for _, capability := range authInfo.Capabilities {
+		if capability == "screen_control_v1" {
+			screenCapable = true
+		}
 		if capability == "agent_update_v1" {
 			updateCapable = true
 		}
@@ -878,6 +896,10 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 	if b.fileCapabilities == nil {
 		b.fileCapabilities = make(map[string]bool)
 	}
+	if b.screenCapabilities == nil {
+		b.screenCapabilities = make(map[string]bool)
+	}
+	b.screenCapabilities[id] = screenCapable
 	b.connections[id] = connectionID
 	b.capabilities[id] = updateCapable
 	b.rdpCapabilities[id] = rdpCapable
@@ -896,6 +918,7 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 			delete(b.connections, id)
 			delete(b.capabilities, id)
 			delete(b.rdpCapabilities, id)
+			delete(b.screenCapabilities, id)
 			delete(b.fileCapabilities, id)
 			delete(b.updating, id)
 		}
@@ -1085,6 +1108,7 @@ func main() {
 	internalMux.HandleFunc("POST /internal/devices/{id}/agent-update", b.agentUpdate)
 	internalMux.HandleFunc("GET /internal/sessions/{id}", b.internalSession)
 	internalMux.HandleFunc("GET /internal/rdp-streams/{id}", b.internalTCP)
+	internalMux.HandleFunc("GET /internal/screen-streams/{id}", b.internalScreen)
 	internalMux.HandleFunc("GET /internal/file-streams/{id}", b.internalFile)
 	internalMux.HandleFunc("POST /internal/file-streams/{id}/cancel", b.cancelFile)
 	internalServer := &http.Server{Addr: ":8081", Handler: internalMux, ReadHeaderTimeout: 5 * time.Second}

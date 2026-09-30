@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Table,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -177,6 +178,7 @@ class RemoteSession(Base):
     )
     state: Mapped[str] = mapped_column(String(16), default="connecting")
     protocol: Mapped[str] = mapped_column(String(16), default="ssh")
+    connection_id: Mapped[str | None] = mapped_column(String(36))
     columns: Mapped[int] = mapped_column(Integer)
     rows: Mapped[int] = mapped_column(Integer)
     dpi: Mapped[int] = mapped_column(Integer, default=96)
@@ -187,7 +189,16 @@ class RemoteSession(Base):
     last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     failure_reason: Mapped[str | None] = mapped_column(String(64))
     request_id: Mapped[str | None] = mapped_column(String(36))
-    __table_args__ = (Index("ix_remote_sessions_device", "device_id"),)
+    __table_args__ = (
+        Index("ix_remote_sessions_device", "device_id"),
+        Index(
+            "uq_screen_device_active",
+            "device_id",
+            unique=True,
+            postgresql_where=text("protocol = 'screen' AND state IN ('connecting', 'active')"),
+            sqlite_where=text("protocol = 'screen' AND state IN ('connecting', 'active')"),
+        ),
+    )
 
 
 class RemoteSessionDiagnosticEvent(Base):

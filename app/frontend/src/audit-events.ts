@@ -5,6 +5,7 @@ export type AuditEvent = {
 }
 
 export const labels: Record<string, string> = {
+  screen_session_started: 'Screen session started', screen_session_ended: 'Screen session closed', screen_session_failed: 'Screen session failed',
   ssh_session_started: 'SSH session started', ssh_session_ended: 'SSH session closed',
   ssh_session_failed: 'SSH session failed', ssh_session_idle_timeout: 'SSH session idle timeout',
   rdp_session_started: 'RDP session started', rdp_session_ended: 'RDP session closed', rdp_session_failed: 'RDP session failed',
@@ -36,7 +37,7 @@ export const filename = (value: unknown) => typeof value === 'string' && value.l
 
 export type Category = 'sessions' | 'files' | 'agents' | 'credentials' | 'security' | 'organization' | 'other'
 export function category(type: string): Category {
-  if (/^(ssh|rdp)_session_/.test(type)) return 'sessions'
+  if (/^(ssh|rdp|screen)_session_/.test(type)) return 'sessions'
   if (type.startsWith('file_')) return 'files'
   if (type.startsWith('agent_') || type.startsWith('device_')) return 'agents'
   if (type.startsWith('credential_')) return 'credentials'
@@ -47,7 +48,7 @@ export function category(type: string): Category {
 
 // The API strips unapproved fields. Keep the UI explicit too, for older or malformed responses.
 const fieldsFor = (type: string) => {
-  if (/^(ssh|rdp)_session_(started|ended|failed)$/.test(type)) return ['reason', 'session_id']
+  if (/^(ssh|rdp|screen)_session_(started|ended|failed)$/.test(type)) return ['reason', 'session_id']
   if (type === 'ssh_session_idle_timeout') return ['session_id']
   if (/^file_(upload|download)_(started|completed|failed|cancelled)$/.test(type)) return ['filename', 'size', 'reason', 'transfer_id']
   if (/^agent_update_(started|completed|failed)$/.test(type)) return ['from_version', 'target_version', 'reason', 'operation_id']

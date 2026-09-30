@@ -165,3 +165,27 @@ Sessions have a 30-minute idle timeout (no input or output), do not record
 terminal content, and cannot be resumed. Closing the browser terminal or
 disconnecting the agent ends the SSH connection. Keep the broker's internal
 port 8081 private to the Compose network and protect `BROKER_INTERNAL_TOKEN`.
+
+## Windows Screen Control v1
+
+Screen Control opens the desktop visible on the physical primary display. Remote Desktop (RDP) remains a separate option and retains its Windows credential and guacd requirements.
+
+For Screen Control, install/enroll the native Windows amd64 agent normally and install/start the `JumpAgent` LocalSystem service. Windows 10/11 or Windows Server 2016+ is required, and a user must be logged into the physical console. Older agents show an update message. No Windows credential, RDP enablement, inbound endpoint port, additional Compose service, STUN/TURN server or new environment setting is needed. The service launches the interactive helper from the installed Program Files executable; an ordinary interactive `jump-agent run` process does not advertise Screen Control.
+
+Open the device's Remote area and choose Screen Control. The workspace includes Control/View Only, Files (when available), Fullscreen and Disconnect. Only one screen session may control a device at once. Session events appear in existing Diagnostics and Audit Log.
+
+V1 captures the primary display only, at approximately 6 FPS when content changes, scaled down to a maximum of 1920×1080. Frames remain in memory; there is no recording or screenshot storage. Mouse and physical keyboard keys use the remote Windows keyboard layout. Browser/OS-reserved shortcuts may be intercepted locally.
+
+There is no multi-monitor selector, audio, clipboard synchronization, Ctrl+Alt+Delete, lock-screen control or secure-desktop/UAC control. If Windows changes to the secure desktop, locks, logs off or switches interactive sessions, Screen Control ends safely. Dismiss the prompt locally or return to the logged-in desktop, then start a new screen session. Normal elevated windows on the ordinary desktop use supported Windows input APIs. Linux/macOS screen control and simultaneous screen technicians are unsupported.
+
+### Manual installed-service verification
+
+1. Install this branch's Windows amd64 binary, enroll it normally, and run `jump-agent service install` from an elevated prompt. Confirm `JumpAgent` runs as LocalSystem (`sc.exe qc JumpAgent`).
+2. Log into the physical console and confirm the agent reports `screen_control_v1` in Jump.
+3. Open Screen Control and compare the browser with the physical primary display, including the cursor. Move/click/right-click/scroll and type in Notepad; test modifiers, navigation, punctuation and function keys. Test an elevated ordinary application.
+4. Switch to View Only and verify mouse/keyboard input has no effect. Switch back to Control, test Files and Fullscreen, and change workspace tabs/pages to verify input is scoped to the active screen.
+5. Disconnect while keys/buttons are held, then reconnect and confirm no stuck inputs. Verify the helper process exits and the agent stays online. Repeat with browser closure, a slow browser, broker reconnect and service stop/restart.
+6. Verify no logged-in console user yields `no_interactive_session`; lock/UAC secure desktop ends safely; logging off or switching users cannot silently control a replacement session.
+7. Confirm the session's safe stages/reasons in Diagnostics and lifecycle events in Audit Log, and verify existing SSH/RDP/Files sessions still work.
+
+These Windows desktop checks require real installed-service testing; Linux cross-compilation and mocked CI do not establish this acceptance result.
