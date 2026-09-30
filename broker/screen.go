@@ -24,7 +24,11 @@ func (b *broker) screenAgentFrame(agent *websocket.Conn, m message) bool {
 	case "screen_error":
 		valid = valid && len(m.Code) <= 64 && m.Data == "" && m.Input == nil
 	case "screen_mode":
-		valid = valid && (m.Mode == "control" || m.Mode == "view") && m.Data == "" && m.Input == nil
+		valid = valid && r.screenPendingMode != "" && m.Mode == r.screenPendingMode && m.Data == "" && m.Input == nil
+		if valid {
+			r.screenMode = m.Mode
+			r.screenPendingMode = ""
+		}
 	default:
 		valid = false
 	}
@@ -91,7 +95,7 @@ func (b *broker) internalScreen(w http.ResponseWriter, r *http.Request) {
 	if conn.ReadJSON(&open) != nil || open.Version != 1 || open.Type != "screen_open" || open.SessionID != id || open.Input != nil || open.Data != "" {
 		return
 	}
-	route := &sessionRoute{deviceID: device, ownerID: user, protocol: "screen", agent: agent, frames: make(chan message, 32), closed: make(chan struct{})}
+	route := &sessionRoute{screenMode: "control", deviceID: device, ownerID: user, protocol: "screen", agent: agent, frames: make(chan message, 32), closed: make(chan struct{})}
 	b.mu.Lock()
 	if !b.screenAllowed(device, connection, id) || b.active[device] != agent {
 		b.mu.Unlock()
@@ -113,7 +117,6 @@ func (b *broker) internalScreen(w http.ResponseWriter, r *http.Request) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		mode := "control"
 		start := time.Now()
 		events := 0
 		for {
@@ -143,14 +146,13 @@ func (b *broker) internalScreen(w http.ResponseWriter, r *http.Request) {
 				if !validScreenInput(m.Input) {
 					return
 				}
-				if mode != "control" {
+				if !route.screenControlling() {
 					continue
 				}
 			case "screen_mode":
-				if m.Mode != "control" && m.Mode != "view" {
+				if !route.requestScreenMode(m.Mode) {
 					return
 				}
-				mode = m.Mode
 			case "screen_ack":
 				if m.FrameID == 0 {
 					return
@@ -178,4 +180,22 @@ func (b *broker) internalScreen(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// A pending transition revokes input immediately, including Control -> View.
+// Only the agent acknowledgement can grant Control again.
+func (r *sessionRoute) screenControlling() bool {
+	r.screenMu.Lock()
+	defer r.screenMu.Unlock()
+	return r.screenMode == "control" && r.screenPendingMode == ""
+}
+
+func (r *sessionRoute) requestScreenMode(mode string) bool {
+	r.screenMu.Lock()
+	defer r.screenMu.Unlock()
+	if (mode != "view" && mode != "control") || r.screenPendingMode != "" {
+		return false
+	}
+	r.screenPendingMode = mode
+	return true
 }

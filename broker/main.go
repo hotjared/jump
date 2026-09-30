@@ -74,18 +74,20 @@ type message struct {
 }
 
 type sessionRoute struct {
-	screenMu     sync.Mutex
-	screenSeq    screenSequence
-	deviceID     string
-	protocol     string
-	ownerID      string
-	agent        *websocket.Conn
-	frames       chan message
-	closed       chan struct{}
-	once         sync.Once
-	firstClose   atomic.Pointer[string]
-	toAgentBytes atomic.Uint64
-	toJumpBytes  atomic.Uint64
+	screenMu          sync.Mutex
+	screenSeq         screenSequence
+	screenMode        string
+	screenPendingMode string
+	deviceID          string
+	protocol          string
+	ownerID           string
+	agent             *websocket.Conn
+	frames            chan message
+	closed            chan struct{}
+	once              sync.Once
+	firstClose        atomic.Pointer[string]
+	toAgentBytes      atomic.Uint64
+	toJumpBytes       atomic.Uint64
 }
 
 func (r *sessionRoute) markClose(reason string) {

@@ -129,7 +129,11 @@ func TestPrivateScreenOwnershipExactConnectionAndInputRouting(t *testing.T) {
 			case "screen_open":
 				_ = agent.WriteJSON(message{Version: 1, Type: "screen_opened", SessionID: m.SessionID})
 			case "screen_mode":
-				_ = agent.WriteJSON(message{Version: 1, Type: "screen_mode", SessionID: m.SessionID, Mode: m.Mode})
+				if m.Mode == "view" {
+					_ = agent.WriteJSON(message{Version: 1, Type: "screen_mode", SessionID: m.SessionID, Mode: m.Mode})
+				}
+			case "screen_ack":
+				_ = agent.WriteJSON(message{Version: 1, Type: "screen_mode", SessionID: m.SessionID, Mode: "control"})
 			}
 		}
 	}()
@@ -178,11 +182,17 @@ func TestPrivateScreenOwnershipExactConnectionAndInputRouting(t *testing.T) {
 	<-events
 	browser.WriteJSON(message{Version: 1, Type: "screen_input", SessionID: id, Input: &screenInput{Action: "key", Key: 65, Down: true}})
 	browser.WriteJSON(message{Version: 1, Type: "screen_mode", SessionID: id, Mode: "control"})
-	if browser.ReadJSON(&reply) != nil {
-		t.Fatal("control not acknowledged")
-	}
+	browser.WriteJSON(message{Version: 1, Type: "screen_input", SessionID: id, Input: &screenInput{Action: "key", Key: 67, Down: true}})
+	// Ordered barrier: the agent acknowledges only after processing this frame.
+	browser.WriteJSON(message{Version: 1, Type: "screen_ack", SessionID: id, FrameID: 99})
 	if m := <-events; m.Type != "screen_mode" {
 		t.Fatal("view input reached agent")
+	}
+	if m := <-events; m.Type != "screen_ack" {
+		t.Fatal("pending control input reached agent")
+	}
+	if browser.ReadJSON(&reply) != nil || reply.Mode != "control" {
+		t.Fatal("control not acknowledged")
 	}
 	browser.WriteJSON(message{Version: 1, Type: "screen_input", SessionID: id, Input: &screenInput{Action: "key", Key: 66, Down: true}})
 	select {
@@ -207,5 +217,45 @@ func TestPrivateScreenOwnershipExactConnectionAndInputRouting(t *testing.T) {
 	b.mu.Unlock()
 	if !online {
 		t.Fatal("screen closed presence")
+	}
+}
+
+func TestScreenPendingModesRevokeInput(t *testing.T) {
+	r := &sessionRoute{screenMode: "control"}
+	if !r.screenControlling() || !r.requestScreenMode("view") || r.screenControlling() {
+		t.Fatal("View request must immediately revoke input")
+	}
+	if r.requestScreenMode("control") {
+		t.Fatal("overlapping mode request accepted")
+	}
+	r.screenMode, r.screenPendingMode = "view", ""
+	if !r.requestScreenMode("control") || r.screenControlling() {
+		t.Fatal("Control request must wait for acknowledgement")
+	}
+}
+
+func TestScreenModeAcknowledgementMustMatchPending(t *testing.T) {
+	for _, pending := range []string{"", "view", "control"} {
+		t.Run("pending_"+pending, func(t *testing.T) {
+			id := "bd0b50e5-4cad-4fcf-9666-3bf2f8e43b4c"
+			agent := &websocket.Conn{}
+			route := &sessionRoute{protocol: "screen", agent: agent, screenMode: "view", screenPendingMode: pending, frames: make(chan message, 1), closed: make(chan struct{})}
+			b := &broker{sessions: map[string]*sessionRoute{id: route}}
+			b.screenAgentFrame(agent, message{Version: 1, Type: "screen_mode", SessionID: id, Mode: "control"})
+			if pending == "control" {
+				if !route.screenControlling() {
+					t.Fatal("matching acknowledgement did not activate Control")
+				}
+			} else {
+				if route.screenControlling() {
+					t.Fatal("unsolicited or mismatched acknowledgement granted Control")
+				}
+				select {
+				case <-route.closed:
+				default:
+					t.Fatal("invalid acknowledgement did not close route")
+				}
+			}
+		})
 	}
 }

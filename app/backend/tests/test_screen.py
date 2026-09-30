@@ -124,6 +124,7 @@ def test_screen_lifecycle_diagnostics_audit_and_view_mode(client, db, monkeypatc
         def __init__(self):
             self.queue = asyncio.Queue()
             self.sent = []
+            self.pending_mode = None
 
         async def send(self, raw):
             frame = json.loads(raw)
@@ -148,6 +149,12 @@ def test_screen_lifecycle_diagnostics_audit_and_view_mode(client, db, monkeypatc
                     )
                 )
             if frame["type"] == "screen_mode":
+                self.pending_mode = frame["mode"]
+                return
+            if frame["type"] == "screen_ack" and self.pending_mode:
+                frame = {"type": "screen_mode", "mode": self.pending_mode}
+                self.pending_mode = None
+            if frame["type"] == "screen_mode":
                 await self.queue.put(
                     json.dumps(
                         {
@@ -158,6 +165,24 @@ def test_screen_lifecycle_diagnostics_audit_and_view_mode(client, db, monkeypatc
                         }
                     )
                 )
+                if frame["mode"] == "view":
+                    # A second frame gives the next transition an ordered barrier.
+                    await self.queue.put(
+                        json.dumps(
+                            {
+                                "version": 1,
+                                "session_id": sid,
+                                "type": "screen_frame",
+                                "frame_id": 2,
+                                "count": 1,
+                                "width": 2,
+                                "height": 1,
+                                "data": base64.b64encode(
+                                    b"\xff\xd8\xff\xc0\x00\x0b\x08\x00\x01\x00\x02\x01\x01\x11\x00\xff\xd9"
+                                ).decode(),
+                            }
+                        )
+                    )
 
         async def recv(self):
             return await self.queue.get()
@@ -179,11 +204,16 @@ def test_screen_lifecycle_diagnostics_audit_and_view_mode(client, db, monkeypatc
         assert ws.receive_json()["state"] == "active"
         packet = ws.receive_bytes()
         assert packet[12:].startswith(b"\xff\xd8")
-        ws.send_json({"type": "screen_ack", "frame_id": 1})
         ws.send_json({"type": "screen_mode", "mode": "view"})
+        ws.send_json({"type": "screen_input", "input": {"action": "key", "key": 68, "down": True}})
+        ws.send_json({"type": "screen_ack", "frame_id": 1})
         assert ws.receive_json() == {"type": "screen_mode", "mode": "view"}
+        ws.receive_bytes()
         ws.send_json({"type": "screen_input", "input": {"action": "key", "key": 65, "down": True}})
         ws.send_json({"type": "screen_mode", "mode": "control"})
+        ws.send_json({"type": "screen_input", "input": {"action": "key", "key": 67, "down": True}})
+        # This ordered barrier releases the acknowledgement after the crafted input.
+        ws.send_json({"type": "screen_ack", "frame_id": 2})
         assert ws.receive_json()["mode"] == "control"
         ws.send_json({"type": "screen_input", "input": {"action": "key", "key": 66, "down": True}})
         ws.send_json({"type": "screen_close"})

@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -14,7 +13,6 @@ import (
 	"fmt"
 	"golang.org/x/sys/windows"
 	"image"
-	"image/jpeg"
 	"io"
 	"os"
 	"runtime"
@@ -511,11 +509,7 @@ func capturePrimary() (desktopFrame, error) {
 		data[i], data[i+2], data[i+3] = data[i+2], data[i], 255
 	}
 	img := &image.RGBA{Pix: data, Stride: width * 4, Rect: image.Rect(0, 0, width, height)}
-	var encoded bytes.Buffer
-	if jpeg.Encode(&encoded, img, &jpeg.Options{Quality: 65}) != nil || encoded.Len() > screenMaxFrame {
-		return desktopFrame{}, errors.New("capture_failed")
-	}
-	return desktopFrame{encoded.Bytes(), width, height}, nil
+	return encodeScreenFrame(img)
 }
 func injectScreenInput(in screenInput) bool {
 	if !validScreenInput(&in) {

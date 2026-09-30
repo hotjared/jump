@@ -405,12 +405,14 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
         )
         db.commit()
         await ws.send_json({"type": "status", "state": "active"})
+        # The acknowledged mode grants input only when no transition is pending.
         mode = "control"
+        pending_mode = None
         assembler = FrameAssembler()
         waiting = 0
 
         async def browser_to_agent():
-            nonlocal mode, waiting
+            nonlocal mode, pending_mode, waiting
             start, events = time.monotonic(), 0
             while True:
                 raw = await ws.receive_text()
@@ -435,12 +437,12 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
                     raise ValueError("invalid_frame")
                 if kind == "screen_input":
                     validate_input(frame["input"])
-                    if mode != "control":
+                    if mode != "control" or pending_mode is not None:
                         continue
                 elif kind == "screen_mode":
-                    if frame["mode"] not in ("control", "view"):
+                    if frame["mode"] not in ("control", "view") or pending_mode is not None:
                         raise ValueError("invalid_frame")
-                    mode = frame["mode"]
+                    pending_mode = frame["mode"]
                 elif kind == "screen_ack":
                     if (
                         type(frame["frame_id"]) is not int
@@ -455,7 +457,7 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
                 await backend.send(json.dumps(frame))
 
         async def agent_to_browser():
-            nonlocal waiting
+            nonlocal mode, pending_mode, waiting
             while True:
                 frame = json.loads(await backend.recv())
                 if frame.get("version") != 1 or frame.get("session_id") != str(session.id):
@@ -472,9 +474,11 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
                         waiting = assembler.last
                         await asyncio.wait_for(ws.send_bytes(complete), 3)
                 elif kind == "screen_mode":
-                    if frame.get("mode") not in ("control", "view"):
+                    if pending_mode is None or frame.get("mode") != pending_mode:
                         raise ValueError("invalid_frame")
-                    await ws.send_json({"type": "screen_mode", "mode": frame["mode"]})
+                    mode = pending_mode
+                    pending_mode = None
+                    await ws.send_json({"type": "screen_mode", "mode": mode})
                 elif kind == "screen_error":
                     return frame.get("code") if frame.get("code") in ERRORS else "capture_failed"
                 elif kind == "screen_close":
