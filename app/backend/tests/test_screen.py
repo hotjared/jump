@@ -2,19 +2,24 @@ import asyncio
 import base64
 import json
 import uuid
-from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, timedelta
+from threading import Barrier, Event
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.orm import Session
 from starlette.websockets import WebSocketDisconnect
 from test_api import BROKER, ORIGIN, as_user, write_headers
 from test_rdp import seed
 
-from jump.db import get_db
+from jump import screen
+from jump.db import Base, get_db
 from jump.main import app
 from jump.models import AuditEvent, RemoteSession, Role, now
 from jump.screen import FrameAssembler, jpeg_size, validate_input
+from jump.session_diagnostics import record_stage
 
 
 @pytest.fixture
@@ -273,3 +278,324 @@ def test_bounded_assembler_order_and_jpeg_dimensions():
     ):
         with pytest.raises(ValueError):
             FrameAssembler().add({**frame, **change})
+
+
+@pytest.mark.parametrize(
+    "state,stale_lease,old_connection,status",
+    [
+        ("active", False, False, 409),
+        ("connecting", False, False, 409),
+        ("active", True, False, 201),
+        ("connecting", True, False, 201),
+        ("active", False, True, 201),
+        ("connecting", False, True, 201),
+    ],
+)
+def test_screen_creation_lease_recovery_and_history(
+    client, db, state, stale_lease, old_connection, status
+):
+    device = seed(db, capabilities=["screen_control_v1"])
+    user = as_user(client, db)
+    sid = uuid.UUID(create(client, device).json()["id"])
+    session = db.get(RemoteSession, sid)
+    session.state = state
+    session.created_at = session.attached_at = now() - timedelta(minutes=5)
+    session.last_activity_at = now() - timedelta(minutes=3) if stale_lease else now()
+    if state == "active":
+        session.connected_at = session.attached_at
+        record_stage(db, sid, "session_active")
+        db.add(
+            AuditEvent(
+                event_type="screen_session_started",
+                actor_user_id=user.id,
+                device_id=device.id,
+                detail={"session_id": str(sid)},
+            )
+        )
+    original_connection = session.connection_id
+    if old_connection:
+        device.connection_id = str(uuid.uuid4())
+    db.commit()
+
+    response = create(client, device)
+    assert response.status_code == status, response.text
+    db.refresh(session)
+    if status == 409:
+        assert session.state == state and session.closed_at is None
+        assert not list(
+            db.scalars(select(AuditEvent).where(AuditEvent.event_type == "screen_session_failed"))
+        )
+        return
+
+    assert session.state == "failed" and session.failure_reason == "session_timeout"
+    assert session.closed_at and session.attached_at and session.device_name == device.hostname
+    assert session.connection_id == original_connection
+    replacement = db.get(RemoteSession, uuid.UUID(response.json()["id"]))
+    assert replacement.connection_id == device.connection_id
+    assert create(client, device).status_code == 409
+    trace = next(x for x in client.get("/api/diagnostics/sessions").json() if x["id"] == str(sid))
+    assert trace["state"] == "failed" and trace["failure_reason"] == "session_timeout"
+    assert {"session_created", "session_failed"} <= {x["stage"] for x in trace["stages"]}
+    if state == "active":
+        assert "session_active" in {x["stage"] for x in trace["stages"]}
+    events = list(
+        db.scalars(select(AuditEvent).where(AuditEvent.event_type.like("screen_session_%")))
+    )
+    assert sum(e.event_type == "screen_session_failed" for e in events) == 1
+    assert sum(e.event_type == "screen_session_started" for e in events) == (state == "active")
+    failed = next(e for e in events if e.event_type == "screen_session_failed")
+    assert failed.detail["session_id"] == str(sid)
+    assert failed.detail["reason"] == "session_timeout"
+
+
+def test_screen_cleanup_leaves_other_protocols_devices_and_history(client, db):
+    device = seed(db, capabilities=["screen_control_v1"])
+    other = seed(db, capabilities=["screen_control_v1"])
+    user = as_user(client, db)
+    old = now() - timedelta(minutes=5)
+    untouched = [
+        RemoteSession(
+            device_id=device.id,
+            user_id=user.id,
+            protocol=protocol,
+            state="active",
+            columns=80,
+            rows=24,
+            last_activity_at=old,
+        )
+        for protocol in ("ssh", "rdp")
+    ]
+    untouched += [
+        RemoteSession(
+            device_id=other.id,
+            user_id=user.id,
+            protocol="screen",
+            state="active",
+            columns=1920,
+            rows=1080,
+            last_activity_at=old,
+        ),
+        RemoteSession(
+            device_id=device.id,
+            user_id=user.id,
+            protocol="screen",
+            state="failed",
+            failure_reason="capture_failed",
+            closed_at=old,
+            columns=1920,
+            rows=1080,
+            last_activity_at=old,
+        ),
+    ]
+    db.add_all(untouched)
+    db.commit()
+    for s in untouched:
+        db.refresh(s)
+    original = [(s.id, s.state, s.failure_reason, s.closed_at) for s in untouched]
+    assert create(client, device).status_code == 201
+    for s, snapshot in zip(untouched, original, strict=True):
+        db.refresh(s)
+        assert (s.id, s.state, s.failure_reason, s.closed_at) == snapshot
+
+
+def test_idle_screen_gateway_refreshes_lease_and_stops_on_disconnect(client, db, monkeypatch):
+    device = seed(db, capabilities=["screen_control_v1"])
+    as_user(client, db)
+    sid = create(client, device).json()["id"]
+    session = db.get(RemoteSession, uuid.UUID(sid))
+    refreshed, stopped = Event(), Event()
+    renewals = []
+    original_refresh = screen.refresh_screen_lease
+    original_maintain = screen.maintain_screen_lease
+
+    def track_refresh(*args):
+        result = original_refresh(*args)
+        renewals.append(session.last_activity_at)
+        if len(renewals) >= 2:
+            refreshed.set()
+        return result
+
+    async def track_lease(*args):
+        try:
+            return await original_maintain(*args)
+        finally:
+            stopped.set()
+
+    class IdleGateway:
+        def __init__(self):
+            self.queue = asyncio.Queue()
+
+        async def send(self, raw):
+            frame = json.loads(raw)
+            if frame["type"] == "screen_open":
+                await self.queue.put(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "session_id": sid,
+                            "type": "screen_opened",
+                        }
+                    )
+                )
+
+        async def recv(self):
+            return await self.queue.get()
+
+        async def close(self):
+            pass
+
+    async def connect(*args, **kwargs):
+        return IdleGateway()
+
+    monkeypatch.setattr(screen, "ws_connect", connect)
+    monkeypatch.setattr(screen, "SCREEN_LEASE_REFRESH_SECONDS", 0.01)
+    monkeypatch.setattr(screen, "refresh_screen_lease", track_refresh)
+    monkeypatch.setattr(screen, "maintain_screen_lease", track_lease)
+    with client.websocket_connect(
+        f"/ws/screen-sessions/{sid}", headers={"Host": "localhost", "Origin": ORIGIN}
+    ) as ws:
+        assert ws.receive_json()["state"] == "active"
+        initial = session.last_activity_at
+        # No frames or input are exchanged while the live gateway renews twice.
+        assert refreshed.wait(2), "idle gateway did not renew its lease"
+        assert renewals[0] > initial and renewals[1] > renewals[0]
+        ws.send_json({"type": "screen_close"})
+        assert ws.receive_json()["state"] == "closed"
+    assert stopped.wait(2), "lease task leaked after gateway shutdown"
+    db.refresh(session)
+    assert session.state == "closed"
+
+
+def test_screen_lease_cannot_renew_finalized_or_other_connection(client, db, monkeypatch):
+    device = seed(db, capabilities=["screen_control_v1"])
+    as_user(client, db)
+    sid = uuid.UUID(create(client, device).json()["id"])
+    session = db.get(RemoteSession, sid)
+    original = session.last_activity_at
+    assert not screen.refresh_screen_lease(db, sid, str(uuid.uuid4()))
+    db.refresh(session)
+    assert session.last_activity_at.replace(tzinfo=UTC) == original.replace(tzinfo=UTC)
+    session.state, session.closed_at = "failed", now()
+    session.failure_reason = "session_timeout"
+    db.commit()
+    assert not screen.refresh_screen_lease(db, sid, device.connection_id)
+    db.refresh(session)
+    assert session.state == "failed"
+    assert session.last_activity_at.replace(tzinfo=UTC) == original.replace(tzinfo=UTC)
+
+    async def lost_lease():
+        return await screen.maintain_screen_lease(db, sid, device.connection_id)
+
+    # Avoid wall-clock waiting; the closed row must cause the task to exit.
+    monkeypatch.setattr(screen, "SCREEN_LEASE_REFRESH_SECONDS", 0)
+    assert asyncio.run(lost_lease()) == "session_timeout"
+
+
+def test_concurrent_screen_creation_keeps_unique_controller(tmp_path):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'screen-concurrency.db'}",
+        connect_args={"check_same_thread": False, "timeout": 10},
+    )
+    Base.metadata.create_all(engine)
+
+    def independent_db():
+        with Session(engine, expire_on_commit=False) as session:
+            yield session
+
+    app.dependency_overrides[get_db] = independent_db
+    try:
+        with (
+            Session(engine, expire_on_commit=False) as db,
+            TestClient(app, base_url=ORIGIN) as client,
+        ):
+            device = seed(db, capabilities=["screen_control_v1"])
+            as_user(client, db)
+            barrier = Barrier(2)
+
+            @event.listens_for(engine, "after_cursor_execute")
+            def race_after_busy_check(conn, cursor, statement, parameters, context, executemany):
+                if statement.startswith("SELECT remote_sessions.id") and "LIMIT" in statement:
+                    # Both requests observe no active controller before either inserts.
+                    barrier.wait(timeout=5)
+
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                attempts = [workers.submit(create, client, device) for _ in range(2)]
+                responses = [attempt.result(timeout=10) for attempt in attempts]
+            event.remove(engine, "after_cursor_execute", race_after_busy_check)
+            assert sorted(r.status_code for r in responses) == [201, 409]
+            live = list(
+                db.scalars(
+                    select(RemoteSession).where(
+                        RemoteSession.device_id == device.id,
+                        RemoteSession.protocol == "screen",
+                        RemoteSession.state.in_(("connecting", "active")),
+                    )
+                )
+            )
+            assert len(live) == 1
+            assert next(r for r in responses if r.status_code == 409).json()["detail"] == (
+                "A Screen Control session is already active."
+            )
+    finally:
+        app.dependency_overrides.clear()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("when", ["opening", "active"])
+def test_expired_gateway_cannot_reactivate_or_duplicate_history(client, db, monkeypatch, when):
+    device = seed(db, capabilities=["screen_control_v1"])
+    as_user(client, db)
+    sid = uuid.UUID(create(client, device).json()["id"])
+    session = db.get(RemoteSession, sid)
+
+    def expire():
+        with Session(db.get_bind(), expire_on_commit=False) as recovery:
+            current_device = recovery.get(type(device), device.id)
+            current_device.connection_id = str(uuid.uuid4())
+            screen.expire_stale_screen_sessions(recovery, current_device)
+        # Simulate the gateway's cached ORM object surviving external recovery.
+        assert session.state in ("connecting", "active")
+
+    class Gateway:
+        def __init__(self):
+            self.first = True
+            self.queue = asyncio.Queue()
+
+        async def send(self, raw):
+            pass
+
+        async def recv(self):
+            if self.first:
+                self.first = False
+                if when == "opening":
+                    expire()
+                return json.dumps({"version": 1, "session_id": str(sid), "type": "screen_opened"})
+            return await self.queue.get()
+
+        async def close(self):
+            pass
+
+    async def connect(*args, **kwargs):
+        return Gateway()
+
+    async def expire_live_lease(*args):
+        expire()
+        return "session_timeout"
+
+    monkeypatch.setattr(screen, "ws_connect", connect)
+    if when == "active":
+        monkeypatch.setattr(screen, "maintain_screen_lease", expire_live_lease)
+    with client.websocket_connect(
+        f"/ws/screen-sessions/{sid}", headers={"Host": "localhost", "Origin": ORIGIN}
+    ) as ws:
+        if when == "active":
+            assert ws.receive_json()["state"] == "active"
+        assert ws.receive_json()["code"] == "session_timeout"
+    db.refresh(session)
+    assert session.state == "failed" and session.failure_reason == "session_timeout"
+    events = list(
+        db.scalars(select(AuditEvent).where(AuditEvent.event_type.like("screen_session_%")))
+    )
+    assert sum(e.event_type == "screen_session_started" for e in events) == (when == "active")
+    assert sum(e.event_type == "screen_session_failed" for e in events) == 1
+    assert create(client, device).status_code == 201

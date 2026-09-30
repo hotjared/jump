@@ -9,7 +9,7 @@ import uuid
 from datetime import UTC, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from websockets.asyncio.client import connect as ws_connect
@@ -39,6 +39,8 @@ ERRORS = {
 }
 MAX_FRAME = 512 * 1024
 CHUNK = 16384
+SCREEN_LEASE_REFRESH_SECONDS = 30
+SCREEN_LEASE_TIMEOUT = timedelta(minutes=2)
 
 
 def eligible(device: Device | None) -> None:
@@ -50,6 +52,55 @@ def eligible(device: Device | None) -> None:
         raise HTTPException(409, "Screen Control requires Windows")
     if "screen_control_v1" not in device.capabilities:
         raise HTTPException(409, ERRORS["unsupported_agent"])
+
+
+def expire_stale_screen_sessions(db: Session, device: Device) -> None:
+    cutoff = now() - SCREEN_LEASE_TIMEOUT
+    stale = db.scalars(
+        select(RemoteSession)
+        .where(
+            RemoteSession.device_id == device.id,
+            RemoteSession.protocol == "screen",
+            RemoteSession.state.in_(("connecting", "active")),
+            or_(
+                RemoteSession.connection_id.is_(None),
+                RemoteSession.connection_id != device.connection_id,
+                RemoteSession.last_activity_at < cutoff,
+                # Preserve the shorter, existing window for unattached sessions.
+                and_(
+                    RemoteSession.state == "connecting",
+                    RemoteSession.attached_at.is_(None),
+                    RemoteSession.created_at < now() - timedelta(seconds=60),
+                ),
+            ),
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).all()
+    for session in stale:
+        finish_remote_session(db, session, "session_timeout")
+
+
+def refresh_screen_lease(db: Session, session_id: uuid.UUID, connection_id: str) -> bool:
+    refreshed = db.execute(
+        update(RemoteSession)
+        .where(
+            RemoteSession.id == session_id,
+            RemoteSession.protocol == "screen",
+            RemoteSession.state.in_(("connecting", "active")),
+            RemoteSession.connection_id == connection_id,
+        )
+        .values(last_activity_at=now())
+    )
+    db.commit()
+    return bool(refreshed.rowcount)
+
+
+async def maintain_screen_lease(db: Session, session_id: uuid.UUID, connection_id: str) -> str:
+    while True:
+        await asyncio.sleep(SCREEN_LEASE_REFRESH_SECONDS)
+        if not refresh_screen_lease(db, session_id, connection_id):
+            return "session_timeout"
 
 
 @router.post("/api/devices/{device_id}/screen-sessions", status_code=201)
@@ -66,17 +117,7 @@ def create_screen(
     operation = latest_update(db, device.id)
     if operation and operation.state in UPDATE_ACTIVE:
         raise HTTPException(409, "Agent update in progress")
-    pending = db.scalars(
-        select(RemoteSession).where(
-            RemoteSession.device_id == device_id,
-            RemoteSession.protocol == "screen",
-            RemoteSession.state == "connecting",
-            RemoteSession.attached_at.is_(None),
-            RemoteSession.created_at < now() - timedelta(seconds=60),
-        )
-    ).all()
-    for abandoned in pending:
-        finish_remote_session(db, abandoned, "session_timeout")
+    expire_stale_screen_sessions(db, device)
     if db.scalar(
         select(RemoteSession.id)
         .where(
@@ -349,7 +390,7 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
             RemoteSession.attached_at.is_(None),
             RemoteSession.state == "connecting",
         )
-        .values(attached_at=now())
+        .values(attached_at=now(), last_activity_at=now())
     )
     db.commit()
     if not claimed.rowcount:
@@ -388,13 +429,25 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
             raise ValueError(first.get("code") if first.get("code") in ERRORS else "capture_failed")
         if first.get("type") != "screen_opened":
             raise ValueError("invalid_frame")
+        activated = db.execute(
+            update(RemoteSession)
+            .where(
+                RemoteSession.id == session.id,
+                RemoteSession.protocol == "screen",
+                RemoteSession.state == "connecting",
+                RemoteSession.connection_id == session.connection_id,
+            )
+            .values(state="active", connected_at=now(), last_activity_at=now())
+        )
+        if not activated.rowcount:
+            db.rollback()
+            raise ValueError("session_timeout")
         for stage in (
             "agent_session_opened",
             "interactive_session_found",
             "session_active",
         ):
             record_stage(db, session.id, stage)
-        session.state, session.connected_at, session.last_activity_at = "active", now(), now()
         db.add(
             AuditEvent(
                 event_type="screen_session_started",
@@ -486,7 +539,11 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
                 else:
                     raise ValueError("invalid_frame")
 
-        tasks = [asyncio.create_task(browser_to_agent()), asyncio.create_task(agent_to_browser())]
+        tasks = [
+            asyncio.create_task(browser_to_agent()),
+            asyncio.create_task(agent_to_browser()),
+            asyncio.create_task(maintain_screen_lease(db, session.id, session.connection_id)),
+        ]
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             reason = next(iter(done)).result()
@@ -515,6 +572,9 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
                 await backend.close()
             except (ConnectionClosed, OSError):
                 pass
+        # A lost lease may have already been finalized by a creation request.
+        # Reload before finalization to preserve that history and avoid duplicate audit events.
+        db.refresh(session, with_for_update=True)
         finish_remote_session(db, session, reason)
         try:
             await ws.send_json(
