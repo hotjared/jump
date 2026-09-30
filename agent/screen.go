@@ -223,6 +223,9 @@ func (m *screenMux) run(s *screenStream, id string) {
 	}
 }
 func screenFailure(err error) string {
+	if safeCaptureCode(err.Error()) {
+		return err.Error()
+	}
 	switch err.Error() {
 	case "no_interactive_session", "helper_start_failed", "capture_failed", "input_failed", "interactive_session_changed", "secure_desktop":
 		return err.Error()
