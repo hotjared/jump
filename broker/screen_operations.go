@@ -42,6 +42,8 @@ func clipboardText(data []byte) bool {
 // One explicit operation, one credited chunk in flight. Buffers are bounded and
 // contain transient clipboard text only; never log or persist this state.
 type screenOperation struct {
+	lastKind     string
+	lastIndex    int
 	lastID       string
 	cancelled    bool
 	id, kind     string
@@ -52,11 +54,11 @@ type screenOperation struct {
 }
 
 func (o *screenOperation) clear() {
-	last := o.id
+	last, kind, index := o.id, o.kind, o.index
 	if last == "" {
-		last = o.lastID
+		last, kind, index = o.lastID, o.lastKind, o.lastIndex
 	}
-	*o = screenOperation{lastID: last}
+	*o = screenOperation{lastID: last, lastKind: kind, lastIndex: index}
 }
 func validOperationEnvelope(m message) bool {
 	if m.Input != nil || m.Mode != "" || m.FrameID != 0 || m.Width != 0 || m.Height != 0 || m.Stage != "" || m.Desktop != "" {
@@ -88,8 +90,10 @@ func (o *screenOperation) request(m message) error {
 		*o = screenOperation{id: m.RequestID, kind: m.Kind, started: time.Now()}
 		return nil
 	}
-	if m.Type == "screen_operation_cancel" && o.id == "" && m.RequestID == o.lastID {
-		return nil
+	if o.id == "" && m.RequestID == o.lastID {
+		if m.Type == "screen_operation_cancel" || m.Type == "screen_clipboard_ack" && o.lastKind == "clipboard_get" && m.Index == o.lastIndex-1 {
+			return nil
+		}
 	}
 	if o.id == "" || m.RequestID != o.id {
 		return bad()

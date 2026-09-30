@@ -118,3 +118,16 @@ func TestCompletedOperationLateCancellationIsHarmless(t *testing.T) {
 		t.Fatal("late cancellation poisoned stream")
 	}
 }
+
+func TestClipboardCreditRacingTimeoutCannotPoisonStream(t *testing.T) {
+	var op screenOperation
+	_ = op.request(message{Type: "screen_operation", RequestID: screenOperationTestID, Kind: "clipboard_get"})
+	_ = op.response(message{Type: "screen_clipboard", RequestID: screenOperationTestID, Count: 1, Data: "eA=="})
+	_ = op.response(message{Type: "screen_operation_result", RequestID: screenOperationTestID, Kind: "clipboard_get", Code: "operation_timeout"})
+	if op.request(message{Type: "screen_clipboard_ack", RequestID: screenOperationTestID}) != nil {
+		t.Fatal("late credited chunk killed Screen")
+	}
+	if op.request(message{Type: "screen_clipboard_ack", RequestID: screenOperationTestID, Index: 2}) == nil {
+		t.Fatal("unrelated credit accepted")
+	}
+}

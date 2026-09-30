@@ -113,3 +113,23 @@ def test_cancel_race_drains_queued_replies_and_late_cancel_is_harmless():
     )
     assert not op.id and not op.data
     op.request({"type": "screen_operation_cancel", "request_id": RID})
+
+
+def test_late_clipboard_credit_at_timeout_does_not_poison_screen():
+    op = ScreenOperation()
+    request(op, "clipboard_get")
+    op.response(
+        {"type": "screen_clipboard", "request_id": RID, "index": 0, "count": 1, "data": "eA=="}
+    )
+    op.response(
+        {
+            "type": "screen_operation_result",
+            "request_id": RID,
+            "kind": "clipboard_get",
+            "code": "operation_timeout",
+        }
+    )
+    op.request({"type": "screen_clipboard_ack", "request_id": RID, "index": 0})
+    assert not op.id
+    with pytest.raises(ValueError):
+        op.request({"type": "screen_clipboard_ack", "request_id": RID, "index": 2})

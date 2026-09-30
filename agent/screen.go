@@ -286,10 +286,10 @@ func (m *screenMux) run(s *screenStream, id string) {
 					fail("invalid_frame")
 					return
 				}
+				if op.id == "" {
+					continue
+				} // Credited reply/cancel may race a completed operation.
 				if in.Type == "screen_operation_cancel" {
-					if op.id == "" {
-						continue
-					}
 					if !finishOperation("operation_cancelled") {
 						return
 					}

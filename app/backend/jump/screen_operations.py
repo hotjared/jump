@@ -34,7 +34,12 @@ class ScreenOperation:
         self.clear()
 
     def clear(self):
-        self.last_id = getattr(self, "id", "") or getattr(self, "last_id", "")
+        if getattr(self, "id", ""):
+            self.last_id, self.last_kind, self.last_index = self.id, self.kind, self.index
+        else:
+            self.last_id = getattr(self, "last_id", "")
+            self.last_kind = getattr(self, "last_kind", "")
+            self.last_index = getattr(self, "last_index", 0)
         self.id = self.kind = ""
         self.started = 0.0
         self.index = self.count = 0
@@ -58,13 +63,14 @@ class ScreenOperation:
                 raise ValueError("invalid_frame")
             self.id, self.kind, self.started = rid, frame["kind"], time.monotonic()
             return
-        if (
-            kind == "screen_operation_cancel"
-            and not self.id
-            and frame.get("request_id") == self.last_id
-            and self.last_id
-        ):
-            return
+        if not self.id and self.last_id and frame.get("request_id") == self.last_id:
+            if kind == "screen_operation_cancel" or (
+                kind == "screen_clipboard_ack"
+                and self.last_kind == "clipboard_get"
+                and type(frame.get("index", 0)) is int
+                and frame.get("index", 0) == self.last_index - 1
+            ):
+                return
         self.match(frame)
         if kind == "screen_operation_cancel":
             self.cancelled = True

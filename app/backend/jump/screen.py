@@ -516,6 +516,8 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
                     raise ValueError("invalid_frame")
                 if kind in OPERATION_FIELDS:
                     operation.request(frame)
+                    if not operation.id:
+                        continue  # Late credit/cancel cannot revive a completed operation.
                     if kind != "screen_operation_cancel" and (
                         mode != "control" or pending_mode is not None
                     ):

@@ -159,6 +159,10 @@ func (b *broker) internalScreen(w http.ResponseWriter, r *http.Request) {
 			case "screen_operation", "screen_clipboard", "screen_clipboard_ack", "screen_operation_cancel":
 				route.screenMu.Lock()
 				err := route.screenOp.request(m)
+				if err == nil && route.screenOp.id == "" {
+					route.screenMu.Unlock()
+					continue
+				}
 				controlling := route.screenMode == "control" && route.screenPendingMode == ""
 				if err == nil && !controlling && m.Type != "screen_operation_cancel" {
 					reply := message{Version: 1, Type: "screen_operation_result", SessionID: id, RequestID: route.screenOp.id, Kind: route.screenOp.kind, Code: "control_required"}
