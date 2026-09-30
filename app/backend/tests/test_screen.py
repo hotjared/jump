@@ -599,3 +599,72 @@ def test_expired_gateway_cannot_reactivate_or_duplicate_history(client, db, monk
     assert sum(e.event_type == "screen_session_started" for e in events) == (when == "active")
     assert sum(e.event_type == "screen_session_failed" for e in events) == 1
     assert create(client, device).status_code == 201
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "capture_invalid_dimensions",
+        "capture_get_dc_failed",
+        "capture_create_dc_failed",
+        "capture_create_bitmap_failed",
+        "capture_select_bitmap_failed",
+        "capture_stretch_mode_failed",
+        "capture_blit_failed",
+        "capture_flush_failed",
+        "capture_pixels_failed",
+        "capture_encode_failed",
+        "unallowlisted Windows error with private content",
+    ],
+)
+def test_capture_stage_diagnostics_remain_safe(client, db, monkeypatch, code):
+    device = seed(db, capabilities=["screen_control_v1"])
+    as_user(client, db)
+    sid = create(client, device).json()["id"]
+
+    class Gateway:
+        def __init__(self):
+            self.opened = False
+
+        async def send(self, raw):
+            pass
+
+        async def recv(self):
+            kind = "screen_error" if self.opened else "screen_opened"
+            self.opened = True
+            return json.dumps(
+                {
+                    "version": 1,
+                    "session_id": sid,
+                    "type": kind,
+                    "code": code,
+                    "extra": "sensitive payload must never be persisted",
+                }
+            )
+
+        async def close(self):
+            pass
+
+    async def connect(*args, **kwargs):
+        return Gateway()
+
+    monkeypatch.setattr(screen, "ws_connect", connect)
+    expected = code if code in screen.ERRORS else "capture_failed"
+    with client.websocket_connect(
+        f"/ws/screen-sessions/{sid}", headers={"Host": "localhost", "Origin": ORIGIN}
+    ) as ws:
+        assert ws.receive_json()["state"] == "active"
+        assert ws.receive_json() == {
+            "type": "status",
+            "state": "closed",
+            "code": expected,
+            "message": "Desktop capture failed.",
+        }
+    trace = next(x for x in client.get("/api/diagnostics/sessions").json() if x["id"] == sid)
+    assert trace["failure_reason"] == expected
+    assert "capture_started" not in {x["stage"] for x in trace["stages"]}
+    failure = db.scalar(select(AuditEvent).where(AuditEvent.event_type == "screen_session_failed"))
+    assert failure.detail["reason"] == expected
+    assert set(failure.detail) == {"session_id", "credential_id", "reason"}
+    db.refresh(device)
+    assert device.online

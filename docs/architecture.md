@@ -76,3 +76,37 @@ IPC uses a randomly named, first-instance named pipe with a protected SYSTEM-onl
 Frames are JPEG, primary display only, scaled to fit 1920×1080. Capture checks run approximately six times per second; unchanged encoded images are suppressed. Each frame is at most 512 KiB and split into at most 32 chunks of 16 KiB over the unchanged 64 KiB agent-message limit. The broker has a 32-message screen queue and rejects invalid sequences on that route only. The backend validates ordering, cumulative size and JPEG dimensions before sending a transient binary frame to the browser. One rendered-frame acknowledgement grants credit for the next frame; absent acknowledgement closes only the screen session after five seconds. Browser/internal input is bounded to 4 KiB messages and 250 messages per second, with a 64-entry agent input queue.
 
 Control/View Only is enforced independently in the frontend, backend, broker and agent. Switching modes releases held keys/buttons; Control resumes only after the helper-side mode acknowledgement. Keyboard listeners belong to the screen canvas and require the active session, rather than capturing page-global keyboard input. Screen images, input events and IPC names are never written to storage or diagnostics.
+
+
+### Windows Screen capture diagnostics
+
+The logged-in console helper captures into a bounded, top-down 32-bit BI_RGB
+`CreateDIBSection` surface. It checks bitmap selection, configures HALFTONE
+with the required brush origin, and tries `SRCCOPY | CAPTUREBLT` followed by
+at most one `SRCCOPY` fallback. Unscaled captures use `BitBlt`; scaled
+captures use `StretchBlt`. Cursor overlay is best effort. `GdiFlush`
+completes drawing before the helper copies BGRX pixels into opaque RGBA.
+Cleanup restores the previous bitmap, destroys the memory DC before deleting
+the DIB, and releases the borrowed screen DC on success and every failure path.
+
+The existing adaptive JPEG encoder, 512 KiB frame limit, frame chunks and
+acknowledgement flow are unchanged. Capture failures propagate only these
+allowlisted reasons through Screen IPC, Diagnostics and Audit Log:
+`capture_invalid_dimensions`, `capture_get_dc_failed`,
+`capture_create_dc_failed`, `capture_create_bitmap_failed`,
+`capture_select_bitmap_failed`, `capture_stretch_mode_failed`,
+`capture_blit_failed`, `capture_flush_failed`, `capture_pixels_failed`, and
+`capture_encode_failed`. The browser message remains “Desktop capture
+failed.” Pixel buffers, screenshots, handles, pointers, paths and raw Windows
+errors are never included in these diagnostics.
+
+Installed-service verification requires a newly built Windows amd64 agent:
+log into the physical console, start Screen Control, and confirm the first
+frame produces `capture_started`. If it fails, report the allowlisted
+failure reason from Diagnostics. Verify disconnect releases the helper,
+agent presence remains online, and RDP/Files still work. No logged-in user
+continues to return `no_interactive_session`; secure desktop and pre-login
+capture remain outside this implementation.
+
+API requirements: [CreateDIBSection](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-createdibsection)
+and [StretchBlt](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-stretchblt).

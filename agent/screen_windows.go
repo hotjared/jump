@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"golang.org/x/sys/windows"
-	"image"
 	"io"
 	"os"
 	"runtime"
@@ -406,7 +405,7 @@ func desktopHelper(args []string) error {
 			}
 			f, e := capturePrimary()
 			if e != nil {
-				return fail("capture_failed")
+				return fail(screenFailure(e))
 			}
 			digest := sha256.Sum256(f.JPEG)
 			if !first && digest == last {
@@ -453,63 +452,109 @@ func capturePrimary() (desktopFrame, error) {
 	metric := screenUser32.NewProc("GetSystemMetrics")
 	w, _, _ := metric.Call(0)
 	h, _, _ := metric.Call(1)
-	if w == 0 || h == 0 || w > 16384 || h > 16384 {
-		return desktopFrame{}, errors.New("capture_failed")
+	width, height, err := captureDimensions(int(w), int(h))
+	if err != nil {
+		return desktopFrame{}, err
 	}
-	scale := 1.0
-	if float64(w) > screenMaxWidth {
-		scale = float64(screenMaxWidth) / float64(w)
+	var resources screenCaptureResources
+	defer resources.close(
+		func(dc, bitmap uintptr) { screenGDI32.NewProc("SelectObject").Call(dc, bitmap) },
+		func(dc uintptr) { screenGDI32.NewProc("DeleteDC").Call(dc) },
+		func(bitmap uintptr) { screenGDI32.NewProc("DeleteObject").Call(bitmap) },
+		func(source uintptr) { screenUser32.NewProc("ReleaseDC").Call(0, source) },
+	)
+	resources.source, _, _ = screenUser32.NewProc("GetDC").Call(0)
+	if resources.source == 0 {
+		return desktopFrame{}, errors.New("capture_get_dc_failed")
 	}
-	if float64(h)*scale > screenMaxHeight {
-		scale = float64(screenMaxHeight) / float64(h)
+	resources.dc, _, _ = screenGDI32.NewProc("CreateCompatibleDC").Call(resources.source)
+	if resources.dc == 0 {
+		return desktopFrame{}, errors.New("capture_create_dc_failed")
 	}
-	width, height := int(float64(w)*scale), int(float64(h)*scale)
-	source, _, _ := screenUser32.NewProc("GetDC").Call(0)
-	if source == 0 {
-		return desktopFrame{}, errors.New("capture_failed")
-	}
-	defer screenUser32.NewProc("ReleaseDC").Call(0, source)
-	dc, _, _ := screenGDI32.NewProc("CreateCompatibleDC").Call(source)
-	if dc == 0 {
-		return desktopFrame{}, errors.New("capture_failed")
-	}
-	defer screenGDI32.NewProc("DeleteDC").Call(dc)
-	bitmap, _, _ := screenGDI32.NewProc("CreateCompatibleBitmap").Call(source, uintptr(width), uintptr(height))
-	if bitmap == 0 {
-		return desktopFrame{}, errors.New("capture_failed")
-	}
-	defer screenGDI32.NewProc("DeleteObject").Call(bitmap)
-	old, _, _ := screenGDI32.NewProc("SelectObject").Call(dc, bitmap)
-	screenGDI32.NewProc("SetStretchBltMode").Call(dc, 4)
-	r, _, _ := screenGDI32.NewProc("StretchBlt").Call(dc, 0, 0, uintptr(width), uintptr(height), source, 0, 0, w, h, 0x40cc0020)
-	if r == 0 {
-		screenGDI32.NewProc("SelectObject").Call(dc, old)
-		return desktopFrame{}, errors.New("capture_failed")
-	}
-	ci := cursorInfo{Size: uint32(unsafe.Sizeof(cursorInfo{}))}
-	if r, _, _ := screenUser32.NewProc("GetCursorInfo").Call(uintptr(unsafe.Pointer(&ci))); r != 0 && ci.Flags&1 != 0 {
-		var ii iconInfo
-		if r, _, _ := screenUser32.NewProc("GetIconInfo").Call(uintptr(ci.Cursor), uintptr(unsafe.Pointer(&ii))); r != 0 {
-			screenUser32.NewProc("DrawIconEx").Call(dc, uintptr(int(float64(ci.X-int32(ii.XHotspot))*scale)), uintptr(int(float64(ci.Y-int32(ii.YHotspot))*scale)), uintptr(ci.Cursor), uintptr(int(32*scale)), uintptr(int(32*scale)), 0, 0, 3)
-			if ii.Mask != 0 {
-				screenGDI32.NewProc("DeleteObject").Call(uintptr(ii.Mask))
-			}
-			if ii.Color != 0 {
-				screenGDI32.NewProc("DeleteObject").Call(uintptr(ii.Color))
-			}
-		}
-	}
-	screenGDI32.NewProc("SelectObject").Call(dc, old)
-	data := make([]byte, width*height*4)
+	// Negative height selects top-down rows; BI_RGB/32bpp needs no color table.
+	// With no file mapping, DeleteObject owns the DIB storage lifetime.
 	info := bitmapInfo{Size: 40, Width: int32(width), Height: -int32(height), Planes: 1, BitCount: 32}
-	if r, _, _ := screenGDI32.NewProc("GetDIBits").Call(dc, bitmap, 0, uintptr(height), uintptr(unsafe.Pointer(&data[0])), uintptr(unsafe.Pointer(&info)), 0); r != uintptr(height) {
-		return desktopFrame{}, errors.New("capture_failed")
+	var bits unsafe.Pointer
+	resources.bitmap, _, _ = screenGDI32.NewProc("CreateDIBSection").Call(
+		resources.source, uintptr(unsafe.Pointer(&info)), 0, uintptr(unsafe.Pointer(&bits)), 0, 0,
+	)
+	if resources.bitmap == 0 {
+		return desktopFrame{}, errors.New("capture_create_bitmap_failed")
 	}
-	for i := 0; i < len(data); i += 4 {
-		data[i], data[i+2], data[i+3] = data[i+2], data[i], 255
+	if bits == nil {
+		return desktopFrame{}, errors.New("capture_pixels_failed")
 	}
-	img := &image.RGBA{Pix: data, Stride: width * 4, Rect: image.Rect(0, 0, width, height)}
-	return encodeScreenFrame(img)
+	old, _, _ := screenGDI32.NewProc("SelectObject").Call(resources.dc, resources.bitmap)
+	if old == 0 || old == ^uintptr(0) {
+		return desktopFrame{}, errors.New("capture_select_bitmap_failed")
+	}
+	resources.previous = old
+	r, _, _ := screenGDI32.NewProc("SetStretchBltMode").Call(resources.dc, 4)
+	if r == 0 {
+		return desktopFrame{}, errors.New("capture_stretch_mode_failed")
+	}
+	// HALFTONE requires resetting the brush origin.
+	r, _, _ = screenGDI32.NewProc("SetBrushOrgEx").Call(resources.dc, 0, 0, 0)
+	if r == 0 {
+		return desktopFrame{}, errors.New("capture_stretch_mode_failed")
+	}
+	if !captureBlit(func(layered bool) bool {
+		rop := uintptr(0x00cc0020) // SRCCOPY
+		if layered {
+			rop |= 0x40000000 // CAPTUREBLT
+		}
+		var copied uintptr
+		if w == uintptr(width) && h == uintptr(height) {
+			copied, _, _ = screenGDI32.NewProc("BitBlt").Call(resources.dc, 0, 0, w, h, resources.source, 0, 0, rop)
+		} else {
+			copied, _, _ = screenGDI32.NewProc("StretchBlt").Call(resources.dc, 0, 0, uintptr(width), uintptr(height), resources.source, 0, 0, w, h, rop)
+		}
+		return copied != 0
+	}) {
+		return desktopFrame{}, errors.New("capture_blit_failed")
+	}
+	drawCaptureCursor(resources.dc, float64(width)/float64(w), float64(height)/float64(h))
+	// GDI may batch writes to a DIB section. Flush on this locked capture thread
+	// before touching the pixel pointer (CreateDIBSection synchronization rule).
+	r, _, _ = screenGDI32.NewProc("GdiFlush").Call()
+	if r == 0 {
+		return desktopFrame{}, errors.New("capture_flush_failed")
+	}
+	img, err := captureImage(unsafe.Slice((*byte)(bits), width*height*4), width, height)
+	if err != nil {
+		return desktopFrame{}, err
+	}
+	frame, err := encodeScreenFrame(img)
+	if err != nil {
+		return desktopFrame{}, errors.New("capture_encode_failed")
+	}
+	return frame, nil
+}
+
+// Cursor overlay is best effort: an unavailable cursor must not discard a
+// valid desktop image. GetIconInfo bitmaps are caller-owned, never the HCURSOR.
+func drawCaptureCursor(dc uintptr, scaleX, scaleY float64) {
+	ci := cursorInfo{Size: uint32(unsafe.Sizeof(cursorInfo{}))}
+	r, _, _ := screenUser32.NewProc("GetCursorInfo").Call(uintptr(unsafe.Pointer(&ci)))
+	if r == 0 || ci.Flags&1 == 0 {
+		return
+	}
+	var ii iconInfo
+	r, _, _ = screenUser32.NewProc("GetIconInfo").Call(uintptr(ci.Cursor), uintptr(unsafe.Pointer(&ii)))
+	if r == 0 {
+		return
+	}
+	if ii.Mask != 0 {
+		defer screenGDI32.NewProc("DeleteObject").Call(uintptr(ii.Mask))
+	}
+	if ii.Color != 0 {
+		defer screenGDI32.NewProc("DeleteObject").Call(uintptr(ii.Color))
+	}
+	screenUser32.NewProc("DrawIconEx").Call(
+		dc, uintptr(int(float64(ci.X-int32(ii.XHotspot))*scaleX)),
+		uintptr(int(float64(ci.Y-int32(ii.YHotspot))*scaleY)), uintptr(ci.Cursor),
+		uintptr(max(1, int(32*scaleX))), uintptr(max(1, int(32*scaleY))), 0, 0, 3,
+	)
 }
 func injectScreenInput(in screenInput) bool {
 	if !validScreenInput(&in) {
