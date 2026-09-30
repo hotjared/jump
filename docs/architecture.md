@@ -37,7 +37,7 @@ The agent initiates outbound TLS connections. Endpoints need no inbound Internet
 
 - **Phase 2:** browser SSH is implemented over multiplexed logical agent sessions. RDP, file transfer, and remote actions remain future work.
 - **Phase 3:** cross-platform files, shell/PowerShell, reboot and restart-agent actions, richer system information.
-- **Later:** physical-console screen sharing, attended Quick Support and consent workflows.
+- **Screen Control v1:** Windows console capture/control uses an interactive helper launched by the enrolled LocalSystem service. Attended Quick Support and consent workflows remain future work.
 
 No VNC, session recording, multitenancy, monitoring, patching, alerting or billing is planned for this foundation.
 
@@ -62,3 +62,17 @@ Jump sends only the selected decrypted credential in a single `session_open`
 message to that agent. The agent reports the host-key fingerprint after SSH
 authentication; Jump pins it on first success and rejects a later mismatch.
 Terminal bytes are forwarded with bounded frames and are never persisted.
+
+## Screen Control session path
+
+Browser → authenticated Jump WebSocket → private bearer-authenticated broker screen route → existing Ed25519-authenticated outbound agent connection → private local named pipe → interactive desktop helper.
+
+Screen Control uses `RemoteSession.protocol = "screen"`, the existing workspace, session Diagnostics and Audit Log. Session creation requires an administrator, an online Windows device, a non-revoked identity and `screen_control_v1`. The session snapshots the device connection ID and reserves one controller per device with a partial unique database index. Browser attachment is one-shot; the broker rechecks ownership and the exact connection through the backend before routing.
+
+The service discovers the physical console session using WTS APIs and confirms a logged-in user exists. It duplicates its LocalSystem primary token, sets its session ID, and launches the protected installed `jump-agent.exe internal-desktop-helper` on `winsta0\default`. The helper is privileged so ordinary elevated application windows can receive input where Windows permits it. It never loads enrollment identity, receives server credentials or opens a network connection. Its environment contains only SystemRoot. A service-owned kill-on-close Windows Job Object prevents orphan helpers, including after a service crash.
+
+IPC uses a randomly named, first-instance named pipe with a protected SYSTEM-only ACL, remote clients rejected and both peers checking process IDs. No local-resource selector is accepted from browser frames. Helper messages are length-prefixed and bounded. GDI capture and SendInput run on a fixed helper thread. The active console ID and input-desktop name are checked before capture/input. A session change or secure/lock desktop ends the session; v1 never switches desktops or disables UAC.
+
+Frames are JPEG, primary display only, scaled to fit 1920×1080. Capture checks run approximately six times per second; unchanged encoded images are suppressed. Each frame is at most 512 KiB and split into at most 32 chunks of 16 KiB over the unchanged 64 KiB agent-message limit. The broker has a 32-message screen queue and rejects invalid sequences on that route only. The backend validates ordering, cumulative size and JPEG dimensions before sending a transient binary frame to the browser. One rendered-frame acknowledgement grants credit for the next frame; absent acknowledgement closes only the screen session after five seconds. Browser/internal input is bounded to 4 KiB messages and 250 messages per second, with a 64-entry agent input queue.
+
+Control/View Only is enforced independently in the frontend, backend, broker and agent. Switching modes releases held keys/buttons; Control resumes only after the helper-side mode acknowledgement. Keyboard listeners belong to the screen canvas and require the active session, rather than capturing page-global keyboard input. Screen images, input events and IPC names are never written to storage or diagnostics.

@@ -5,7 +5,7 @@ import re
 FIELDS = {
     **{
         f"{protocol}_session_{state}": ("session_id", "reason")
-        for protocol in ("ssh", "rdp")
+        for protocol in ("ssh", "rdp", "screen")
         for state in ("started", "ended", "failed")
     },
     "ssh_session_idle_timeout": ("session_id",),

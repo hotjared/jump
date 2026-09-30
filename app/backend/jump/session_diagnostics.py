@@ -23,6 +23,9 @@ STAGES = frozenset(
         "guacd_handshake_started",
         "protocol_ready",
         "session_active",
+        "agent_session_opened",
+        "interactive_session_found",
+        "capture_started",
         "session_closed",
         "session_failed",
     }

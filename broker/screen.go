@@ -1,0 +1,181 @@
+package main
+
+import (
+	"crypto/subtle"
+	"github.com/gorilla/websocket"
+	"net/http"
+	"time"
+)
+
+func (b *broker) screenAgentFrame(agent *websocket.Conn, m message) bool {
+	b.mu.Lock()
+	r := b.sessions[m.SessionID]
+	b.mu.Unlock()
+	if r == nil || r.protocol != "screen" || r.agent != agent {
+		return true
+	}
+	valid := m.Version == 1 && validScreenID(m.SessionID)
+	r.screenMu.Lock()
+	switch m.Type {
+	case "screen_frame":
+		valid = valid && r.screenSeq.chunk(m) == nil
+	case "screen_opened", "screen_close":
+		valid = valid && m.Data == "" && m.Input == nil
+	case "screen_error":
+		valid = valid && len(m.Code) <= 64 && m.Data == "" && m.Input == nil
+	case "screen_mode":
+		valid = valid && (m.Mode == "control" || m.Mode == "view") && m.Data == "" && m.Input == nil
+	default:
+		valid = false
+	}
+	r.screenMu.Unlock()
+	if !valid {
+		r.markClose("invalid_frame")
+		b.closeRoute(m.SessionID, r)
+		return true
+	}
+	select {
+	case <-r.closed:
+		return true
+	default:
+	}
+	select {
+	case r.frames <- m:
+	default:
+		r.markClose("screen_backpressure")
+		b.closeRoute(m.SessionID, r)
+	}
+	return true
+}
+func (b *broker) screenAllowed(device, connection, id string) bool {
+	if b.active[device] == nil || b.connections[device] != connection || !b.screenCapabilities[device] || b.updating[device] || b.sessions[id] != nil {
+		return false
+	}
+	for _, r := range b.sessions {
+		if r.deviceID == device && r.protocol == "screen" {
+			return false
+		}
+	}
+	return true
+}
+func (b *broker) internalScreen(w http.ResponseWriter, r *http.Request) {
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+b.token)) != 1 {
+		http.Error(w, "unauthorized", 401)
+		return
+	}
+	id, device, connection, user := r.PathValue("id"), r.URL.Query().Get("device_id"), r.URL.Query().Get("connection_id"), r.URL.Query().Get("user_id")
+	if !validScreenID(id) || !validScreenID(device) || !validScreenID(connection) || !validScreenID(user) || r.Header.Get("Origin") != "" {
+		http.Error(w, "invalid session", 400)
+		return
+	}
+	if b.call(r.Context(), "GET", "/api/internal/screen-streams/"+id+"/authorize?device_id="+device+"&connection_id="+connection+"&user_id="+user, nil, nil) != nil {
+		http.Error(w, "session unauthorized", 403)
+		return
+	}
+	b.mu.Lock()
+	allowed := b.screenAllowed(device, connection, id)
+	agent := b.active[device]
+	b.mu.Unlock()
+	if !allowed {
+		http.Error(w, "agent unavailable", 409)
+		return
+	}
+	conn, e := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(w, r, nil)
+	if e != nil {
+		return
+	}
+	defer conn.Close()
+	conn.SetReadLimit(4096)
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	var open message
+	if conn.ReadJSON(&open) != nil || open.Version != 1 || open.Type != "screen_open" || open.SessionID != id || open.Input != nil || open.Data != "" {
+		return
+	}
+	route := &sessionRoute{deviceID: device, ownerID: user, protocol: "screen", agent: agent, frames: make(chan message, 32), closed: make(chan struct{})}
+	b.mu.Lock()
+	if !b.screenAllowed(device, connection, id) || b.active[device] != agent {
+		b.mu.Unlock()
+		return
+	}
+	if b.sessions == nil {
+		b.sessions = make(map[string]*sessionRoute)
+	}
+	b.sessions[id] = route
+	b.mu.Unlock()
+	defer func() {
+		b.closeRoute(id, route)
+		_ = b.write(agent, message{Version: 1, Type: "screen_close", SessionID: id})
+	}()
+	if b.write(agent, message{Version: 1, Type: "screen_open", SessionID: id}) != nil {
+		return
+	}
+	conn.SetReadDeadline(time.Time{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		mode := "control"
+		start := time.Now()
+		events := 0
+		for {
+			var m message
+			if conn.ReadJSON(&m) != nil {
+				return
+			}
+			if time.Since(start) > time.Second {
+				start = time.Now()
+				events = 0
+			}
+			events++
+			if events > 250 {
+				return
+			}
+			if m.Version != 1 || m.SessionID != id || m.Data != "" {
+				return
+			}
+			b.mu.Lock()
+			live := b.active[device] == agent && b.connections[device] == connection && b.sessions[id] == route
+			b.mu.Unlock()
+			if !live {
+				return
+			}
+			switch m.Type {
+			case "screen_input":
+				if !validScreenInput(m.Input) {
+					return
+				}
+				if mode != "control" {
+					continue
+				}
+			case "screen_mode":
+				if m.Mode != "control" && m.Mode != "view" {
+					return
+				}
+				mode = m.Mode
+			case "screen_ack":
+				if m.FrameID == 0 {
+					return
+				}
+			case "screen_close":
+				return
+			default:
+				return
+			}
+			if b.write(agent, message{Version: 1, Type: m.Type, SessionID: id, Input: m.Input, Mode: m.Mode, FrameID: m.FrameID}) != nil {
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		case <-route.closed:
+			return
+		case m := <-route.frames:
+			conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+			if conn.WriteJSON(m) != nil || m.Type == "screen_error" || m.Type == "screen_close" {
+				return
+			}
+		}
+	}
+}

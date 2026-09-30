@@ -4,8 +4,9 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { SshSession } from './ssh-session'
 import { RdpSession } from './rdp-session'
+import { ScreenSession } from './screen-session'
 
-export type WorkspaceSession = SshSession | RdpSession
+export type WorkspaceSession = SshSession | RdpSession | ScreenSession
 
 const MIN_COLUMNS = 20
 const MAX_COLUMNS = 500
@@ -98,6 +99,15 @@ function SessionDesktop({ session, visible }: { session: RdpSession; visible: bo
   return <div className="workspace-desktop" ref={node} aria-label={`${session.name} RDP desktop`} />
 }
 
+function SessionScreen({ session, visible }: { session: ScreenSession; visible: boolean }) {
+  const node = useRef<HTMLDivElement>(null)
+  const active = useRef(visible)
+  active.current = visible
+  useEffect(() => { if (node.current) return session.attach(node.current, () => active.current) }, [session])
+  useEffect(() => { if (!visible) session.release() }, [visible, session])
+  return <div className="workspace-desktop" ref={node} aria-label={`${session.name} Screen desktop`} />
+}
+
 function RdpActions({ session }: { session: RdpSession }) {
   const [feedback, setFeedback] = useState('')
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -152,12 +162,12 @@ export default function SessionWorkspace({ sessions, activeId, select, close, fi
       className="session-view" key={session.id} hidden={activeId !== session.id}>
       <div className="session-heading"><div><strong>{session.name}</strong><span className="muted">{session.platform} · {session.protocol}</span>
         <span className={`session-state state-${session.state}`}><i />{session.state}</span></div>
-        <div className="session-actions">{fileDevices.includes(session.deviceId) && <button className="button" onClick={() => openFiles(session.deviceId)}>Files</button>}{session.protocol === 'RDP' && <><RdpActions session={session} /><button className="button" onClick={e => e.currentTarget.closest('.session-view')?.requestFullscreen()}>Fullscreen</button></>}
+        <div className="session-actions">{fileDevices.includes(session.deviceId) && <button className="button" onClick={() => openFiles(session.deviceId)}>Files</button>}{session.protocol === 'Screen' && <><button className="button" disabled={session.state !== 'connected'} onClick={() => session.setMode(session.mode === 'control' ? 'view' : 'control')}>{session.mode === 'control' ? 'Control · switch to View Only' : 'View Only · switch to Control'}</button><button className="button" onClick={e => e.currentTarget.closest('.session-view')?.requestFullscreen()}>Fullscreen</button></>}{session.protocol === 'RDP' && <><RdpActions session={session} /><button className="button" onClick={e => e.currentTarget.closest('.session-view')?.requestFullscreen()}>Fullscreen</button></>}
           <button className="button" onClick={() => closeTab(session.id)}>Disconnect</button></div></div>
       {session.error && <p className="session-error" role="alert">{session.error}</p>}
       {session.protocol === 'RDP' && session.clipboardError && <p className="session-error" role="alert">{session.clipboardError}</p>}
-      {session.protocol === 'SSH' ? <SessionTerminal session={session} visible={activeId === session.id} /> : <SessionDesktop session={session} visible={activeId === session.id} />}
-      <div className="session-footer">Jump agent · {session.protocol === 'SSH' ? 'SSH localhost:22' : 'RDP localhost:3389'}</div>
+      {session.protocol === 'SSH' ? <SessionTerminal session={session} visible={activeId === session.id} /> : session.protocol === 'Screen' ? <SessionScreen session={session} visible={activeId === session.id} /> : <SessionDesktop session={session} visible={activeId === session.id} />}
+      <div className="session-footer">Jump agent · {session.protocol === 'SSH' ? 'SSH localhost:22' : session.protocol === 'Screen' ? 'Windows console desktop · primary display' : 'RDP localhost:3389'}</div>
     </div>)}
   </section>
 }
