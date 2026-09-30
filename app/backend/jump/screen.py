@@ -47,6 +47,9 @@ ERRORS = {
     "capture_encode_failed": "Desktop capture failed.",
     "input_failed": "Windows input could not be delivered.",
     "interactive_session_changed": "The Windows console session changed. Start a new session.",
+    # Retain the safe legacy reason for historical Diagnostics/older agents.
+    # New helpers follow secure desktops and emit specific attachment failures.
+    "secure_desktop": "Screen Control ended because Windows switched to a lock or secure desktop.",
     "desktop_open_failed": "Windows input desktop could not be opened.",
     "desktop_switch_failed": "Windows input desktop could not be attached.",
     "agent_disconnected": "Jump agent disconnected.",

@@ -614,10 +614,13 @@ def test_expired_gateway_cannot_reactivate_or_duplicate_history(client, db, monk
         "capture_flush_failed",
         "capture_pixels_failed",
         "capture_encode_failed",
+        "desktop_open_failed",
+        "desktop_switch_failed",
+        "secure_desktop",
         "unallowlisted Windows error with private content",
     ],
 )
-def test_capture_stage_diagnostics_remain_safe(client, db, monkeypatch, code):
+def test_capture_and_desktop_failure_diagnostics_remain_safe(client, db, monkeypatch, code):
     device = seed(db, capabilities=["screen_control_v1"])
     as_user(client, db)
     sid = create(client, device).json()["id"]
@@ -658,7 +661,7 @@ def test_capture_stage_diagnostics_remain_safe(client, db, monkeypatch, code):
             "type": "status",
             "state": "closed",
             "code": expected,
-            "message": "Desktop capture failed.",
+            "message": screen.ERRORS[expected],
         }
     trace = next(x for x in client.get("/api/diagnostics/sessions").json() if x["id"] == sid)
     assert trace["failure_reason"] == expected
