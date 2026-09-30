@@ -18,13 +18,21 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from .db import get_db
 from .main import UPDATE_ACTIVE, admin, cfg, finish_remote_session, internal, latest_update
 from .models import AuditEvent, Device, RemoteSession, User, now
+from .screen_operations import (
+    CLIPBOARD_WIRE_MAX,
+    DESKTOPS,
+    EVENTS,
+    OPERATION_CODES,
+    OPERATION_FIELDS,
+    ScreenOperation,
+)
 from .session_diagnostics import record_stage
 
 router = APIRouter()
 ERRORS = {
     "device_offline": "Device is offline.",
     "unsupported_agent": "Update the Windows Jump service to enable Screen Control.",
-    "no_interactive_session": "No logged-in console desktop is available.",
+    "no_interactive_session": "No physical Windows console session is available.",
     "helper_start_failed": "Could not start the Windows desktop helper.",
     "capture_failed": "Desktop capture failed.",
     "capture_invalid_dimensions": "Desktop capture failed.",
@@ -39,7 +47,8 @@ ERRORS = {
     "capture_encode_failed": "Desktop capture failed.",
     "input_failed": "Windows input could not be delivered.",
     "interactive_session_changed": "The Windows console session changed. Start a new session.",
-    "secure_desktop": "Screen Control ended because Windows switched to a lock or secure desktop.",
+    "desktop_open_failed": "Windows input desktop could not be opened.",
+    "desktop_switch_failed": "Windows input desktop could not be attached.",
     "agent_disconnected": "Jump agent disconnected.",
     "session_timeout": "Screen session timed out.",
     "session_closed": "Screen session ended.",
@@ -471,6 +480,7 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
         # The acknowledged mode grants input only when no transition is pending.
         mode = "control"
         pending_mode = None
+        operation = ScreenOperation()
         assembler = FrameAssembler()
         waiting = 0
 
@@ -479,7 +489,7 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
             start, events = time.monotonic(), 0
             while True:
                 raw = await ws.receive_text()
-                if len(raw) > 4096:
+                if len(raw.encode("utf-8")) > CLIPBOARD_WIRE_MAX:
                     raise ValueError("invalid_frame")
                 frame = json.loads(raw)
                 if not isinstance(frame, dict):
@@ -490,7 +500,10 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
                 if events > 250:
                     raise ValueError("invalid_frame")
                 kind = frame.get("type")
+                if kind != "screen_clipboard" and len(raw.encode("utf-8")) > 4096:
+                    raise ValueError("invalid_frame")
                 allowed = {
+                    **OPERATION_FIELDS,
                     "screen_input": {"type", "input"},
                     "screen_mode": {"type", "mode"},
                     "screen_ack": {"type", "frame_id"},
@@ -498,7 +511,23 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
                 }
                 if kind not in allowed or set(frame) != allowed[kind]:
                     raise ValueError("invalid_frame")
-                if kind == "screen_input":
+                if kind in OPERATION_FIELDS:
+                    operation.request(frame)
+                    if kind != "screen_operation_cancel" and (
+                        mode != "control" or pending_mode is not None
+                    ):
+                        await ws.send_json(
+                            {
+                                "type": "screen_operation_result",
+                                "request_id": operation.id,
+                                "kind": operation.kind,
+                                "code": "control_required",
+                                "message": OPERATION_CODES["control_required"],
+                            }
+                        )
+                        operation.clear()
+                        continue
+                elif kind == "screen_input":
                     validate_input(frame["input"])
                     if mode != "control" or pending_mode is not None:
                         continue
@@ -536,6 +565,42 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
                             db.commit()
                         waiting = assembler.last
                         await asyncio.wait_for(ws.send_bytes(complete), 3)
+                elif kind == "screen_event":
+                    stage, desktop = frame.get("stage"), frame.get("desktop", "")
+                    if (
+                        stage not in EVENTS
+                        or desktop not in DESKTOPS | {""}
+                        or frame.get("data")
+                        or desktop
+                        and stage.startswith("sas_")
+                    ):
+                        raise ValueError("invalid_frame")
+                    record_stage(db, session.id, stage)
+                    db.commit()
+                elif kind in (
+                    "screen_clipboard",
+                    "screen_clipboard_ack",
+                    "screen_operation_result",
+                ):
+                    ignored = operation.cancelled and kind != "screen_operation_result"
+                    operation.response(frame)
+                    if ignored:
+                        continue
+                    if kind == "screen_operation_result":
+                        await ws.send_json(
+                            {
+                                "type": kind,
+                                "request_id": frame["request_id"],
+                                "kind": frame["kind"],
+                                "code": frame["code"],
+                                "message": OPERATION_CODES[frame["code"]],
+                            }
+                        )
+                    else:
+                        fields = OPERATION_FIELDS[kind]
+                        await ws.send_json(
+                            {key: frame.get(key, 0 if key == "index" else "") for key in fields}
+                        )
                 elif kind == "screen_mode":
                     if pending_mode is None or frame.get("mode") != pending_mode:
                         raise ValueError("invalid_frame")

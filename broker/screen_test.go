@@ -134,6 +134,20 @@ func TestPrivateScreenOwnershipExactConnectionAndInputRouting(t *testing.T) {
 				}
 			case "screen_ack":
 				_ = agent.WriteJSON(message{Version: 1, Type: "screen_mode", SessionID: m.SessionID, Mode: "control"})
+			case "screen_operation":
+				if m.Kind == "sas" {
+					_ = agent.WriteJSON(message{Version: 1, Type: "screen_operation_result", SessionID: m.SessionID, RequestID: m.RequestID, Kind: m.Kind, Code: "sas_blocked"})
+				}
+				if m.Kind == "clipboard_get" {
+					_ = agent.WriteJSON(message{Version: 1, Type: "screen_clipboard", SessionID: m.SessionID, RequestID: m.RequestID, Count: 1})
+				}
+			case "screen_clipboard":
+				_ = agent.WriteJSON(message{Version: 1, Type: "screen_clipboard_ack", SessionID: m.SessionID, RequestID: m.RequestID, Index: m.Index})
+				if m.Index == m.Count-1 {
+					_ = agent.WriteJSON(message{Version: 1, Type: "screen_operation_result", SessionID: m.SessionID, RequestID: m.RequestID, Kind: "clipboard_set", Code: "ok"})
+				}
+			case "screen_clipboard_ack":
+				_ = agent.WriteJSON(message{Version: 1, Type: "screen_operation_result", SessionID: m.SessionID, RequestID: m.RequestID, Kind: "clipboard_get", Code: "ok"})
 			}
 		}
 	}()
@@ -180,9 +194,17 @@ func TestPrivateScreenOwnershipExactConnectionAndInputRouting(t *testing.T) {
 		t.Fatal("view not acknowledged")
 	}
 	<-events
+	browser.WriteJSON(message{Version: 1, Type: "screen_operation", SessionID: id, RequestID: id, Kind: "sas"})
+	if browser.ReadJSON(&reply) != nil || reply.Code != "control_required" {
+		t.Fatal("SAS permitted in View Only")
+	}
 	browser.WriteJSON(message{Version: 1, Type: "screen_input", SessionID: id, Input: &screenInput{Action: "key", Key: 65, Down: true}})
 	browser.WriteJSON(message{Version: 1, Type: "screen_mode", SessionID: id, Mode: "control"})
 	browser.WriteJSON(message{Version: 1, Type: "screen_input", SessionID: id, Input: &screenInput{Action: "key", Key: 67, Down: true}})
+	browser.WriteJSON(message{Version: 1, Type: "screen_operation", SessionID: id, RequestID: id, Kind: "sas"})
+	if browser.ReadJSON(&reply) != nil || reply.Code != "control_required" {
+		t.Fatal("SAS permitted before mode acknowledgement")
+	}
 	// Ordered barrier: the agent acknowledges only after processing this frame.
 	browser.WriteJSON(message{Version: 1, Type: "screen_ack", SessionID: id, FrameID: 99})
 	if m := <-events; m.Type != "screen_mode" {
@@ -202,6 +224,41 @@ func TestPrivateScreenOwnershipExactConnectionAndInputRouting(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("missing input")
+	}
+	// Clipboard messages alone may exceed the 4 KiB input limit.
+	browser.WriteJSON(message{Version: 1, Type: "screen_operation", SessionID: id, RequestID: id, Kind: "clipboard_set"})
+	if (<-events).Kind != "clipboard_set" {
+		t.Fatal("set request")
+	}
+	text := []byte(strings.Repeat("x", screenChunkBytes) + "世界")
+	for _, chunk := range clipboardChunks(id, text) {
+		chunk.Version = 1
+		chunk.SessionID = id
+		browser.WriteJSON(chunk)
+		if browser.ReadJSON(&reply) != nil || reply.Type != "screen_clipboard_ack" || reply.Index != chunk.Index {
+			t.Fatal("clipboard credit")
+		}
+		if (<-events).Type != "screen_clipboard" {
+			t.Fatal("chunk not routed")
+		}
+	}
+	if browser.ReadJSON(&reply) != nil || reply.Code != "ok" {
+		t.Fatal("clipboard completion")
+	}
+	browser.WriteJSON(message{Version: 1, Type: "screen_operation", SessionID: id, RequestID: id, Kind: "clipboard_get"})
+	<-events
+	if browser.ReadJSON(&reply) != nil || reply.Type != "screen_clipboard" || reply.Data != "" {
+		t.Fatal("empty clipboard")
+	}
+	browser.WriteJSON(message{Version: 1, Type: "screen_clipboard_ack", SessionID: id, RequestID: id})
+	<-events
+	if browser.ReadJSON(&reply) != nil || reply.Code != "ok" {
+		t.Fatal("get completion")
+	}
+	browser.WriteJSON(message{Version: 1, Type: "screen_operation", SessionID: id, RequestID: id, Kind: "sas"})
+	<-events
+	if browser.ReadJSON(&reply) != nil || reply.Code != "sas_blocked" {
+		t.Fatal("SAS failure lost")
 	}
 	browser.WriteJSON(message{Version: 1, Type: "screen_close", SessionID: id})
 	select {

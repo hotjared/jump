@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/subtle"
+	"encoding/json"
 	"github.com/gorilla/websocket"
 	"net/http"
 	"time"
@@ -16,7 +17,12 @@ func (b *broker) screenAgentFrame(agent *websocket.Conn, m message) bool {
 	}
 	valid := m.Version == 1 && validScreenID(m.SessionID)
 	r.screenMu.Lock()
+	ignored := r.screenOp.cancelled && m.RequestID == r.screenOp.id && m.Type != "screen_operation_result" && (m.Type == "screen_clipboard" || m.Type == "screen_clipboard_ack")
 	switch m.Type {
+	case "screen_event":
+		valid = valid && m.Data == "" && m.Input == nil && safeScreenEvent(m)
+	case "screen_clipboard", "screen_clipboard_ack", "screen_operation_result":
+		valid = valid && r.screenOp.response(m) == nil
 	case "screen_frame":
 		valid = valid && r.screenSeq.chunk(m) == nil
 	case "screen_opened", "screen_close":
@@ -33,6 +39,9 @@ func (b *broker) screenAgentFrame(agent *websocket.Conn, m message) bool {
 		valid = false
 	}
 	r.screenMu.Unlock()
+	if ignored && valid {
+		return true
+	}
 	if !valid {
 		r.markClose("invalid_frame")
 		b.closeRoute(m.SessionID, r)
@@ -43,8 +52,12 @@ func (b *broker) screenAgentFrame(agent *websocket.Conn, m message) bool {
 		return true
 	default:
 	}
+	queue := r.frames
+	if r.screenActions != nil && (m.Type == "screen_event" || m.Type == "screen_clipboard" || m.Type == "screen_clipboard_ack" || m.Type == "screen_operation_result") {
+		queue = r.screenActions
+	}
 	select {
-	case r.frames <- m:
+	case queue <- m:
 	default:
 		r.markClose("screen_backpressure")
 		b.closeRoute(m.SessionID, r)
@@ -89,13 +102,13 @@ func (b *broker) internalScreen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-	conn.SetReadLimit(4096)
+	conn.SetReadLimit(screenClipboardWireMax)
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var open message
 	if conn.ReadJSON(&open) != nil || open.Version != 1 || open.Type != "screen_open" || open.SessionID != id || open.Input != nil || open.Data != "" {
 		return
 	}
-	route := &sessionRoute{screenMode: "control", deviceID: device, ownerID: user, protocol: "screen", agent: agent, frames: make(chan message, 32), closed: make(chan struct{})}
+	route := &sessionRoute{screenActions: make(chan message, 8), screenMode: "control", deviceID: device, ownerID: user, protocol: "screen", agent: agent, frames: make(chan message, 32), closed: make(chan struct{})}
 	b.mu.Lock()
 	if !b.screenAllowed(device, connection, id) || b.active[device] != agent {
 		b.mu.Unlock()
@@ -121,7 +134,8 @@ func (b *broker) internalScreen(w http.ResponseWriter, r *http.Request) {
 		events := 0
 		for {
 			var m message
-			if conn.ReadJSON(&m) != nil {
+			_, raw, err := conn.ReadMessage()
+			if err != nil || len(raw) > screenClipboardWireMax || json.Unmarshal(raw, &m) != nil || m.Type != "screen_clipboard" && len(raw) > 4096 {
 				return
 			}
 			if time.Since(start) > time.Second {
@@ -132,7 +146,7 @@ func (b *broker) internalScreen(w http.ResponseWriter, r *http.Request) {
 			if events > 250 {
 				return
 			}
-			if m.Version != 1 || m.SessionID != id || m.Data != "" {
+			if m.Version != 1 || m.SessionID != id || m.Type != "screen_clipboard" && m.Data != "" {
 				return
 			}
 			b.mu.Lock()
@@ -142,6 +156,25 @@ func (b *broker) internalScreen(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			switch m.Type {
+			case "screen_operation", "screen_clipboard", "screen_clipboard_ack", "screen_operation_cancel":
+				route.screenMu.Lock()
+				err := route.screenOp.request(m)
+				controlling := route.screenMode == "control" && route.screenPendingMode == ""
+				if err == nil && !controlling && m.Type != "screen_operation_cancel" {
+					reply := message{Version: 1, Type: "screen_operation_result", SessionID: id, RequestID: route.screenOp.id, Kind: route.screenOp.kind, Code: "control_required"}
+					route.screenOp.clear()
+					route.screenMu.Unlock()
+					select {
+					case route.frames <- reply:
+					case <-route.closed:
+						return
+					}
+					continue
+				}
+				route.screenMu.Unlock()
+				if err != nil {
+					return
+				}
 			case "screen_input":
 				if !validScreenInput(m.Input) {
 					return
@@ -162,17 +195,34 @@ func (b *broker) internalScreen(w http.ResponseWriter, r *http.Request) {
 			default:
 				return
 			}
-			if b.write(agent, message{Version: 1, Type: m.Type, SessionID: id, Input: m.Input, Mode: m.Mode, FrameID: m.FrameID}) != nil {
+			if b.write(agent, message{Version: 1, Type: m.Type, SessionID: id, Input: m.Input, Mode: m.Mode, FrameID: m.FrameID, RequestID: m.RequestID, Kind: m.Kind, Data: m.Data, Index: m.Index, Count: m.Count}) != nil {
 				return
 			}
 		}
 	}()
+	// Preserve the opening handshake before independent action/event traffic.
+	select {
+	case <-done:
+		return
+	case <-route.closed:
+		return
+	case first := <-route.frames:
+		conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+		if conn.WriteJSON(first) != nil || first.Type != "screen_opened" {
+			return
+		}
+	}
 	for {
 		select {
 		case <-done:
 			return
 		case <-route.closed:
 			return
+		case m := <-route.screenActions:
+			conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+			if conn.WriteJSON(m) != nil {
+				return
+			}
 		case m := <-route.frames:
 			conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
 			if conn.WriteJSON(m) != nil || m.Type == "screen_error" || m.Type == "screen_close" {

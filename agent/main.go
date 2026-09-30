@@ -50,6 +50,9 @@ type identity struct {
 	PrivateKey string `json:"private_key"`
 }
 type message struct {
+	RequestID     string       `json:"request_id,omitempty"`
+	Stage         string       `json:"stage,omitempty"`
+	Desktop       string       `json:"desktop,omitempty"`
 	FrameID       uint64       `json:"frame_id,omitempty"`
 	Index         int          `json:"index,omitempty"`
 	Count         int          `json:"count,omitempty"`

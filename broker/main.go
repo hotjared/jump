@@ -31,6 +31,9 @@ var pingInterval = 25 * time.Second
 var heartbeatTimeout = 65 * time.Second
 
 type message struct {
+	RequestID     string          `json:"request_id,omitempty"`
+	Stage         string          `json:"stage,omitempty"`
+	Desktop       string          `json:"desktop,omitempty"`
 	FrameID       uint64          `json:"frame_id,omitempty"`
 	Index         int             `json:"index,omitempty"`
 	Count         int             `json:"count,omitempty"`
@@ -76,6 +79,8 @@ type message struct {
 type sessionRoute struct {
 	screenMu          sync.Mutex
 	screenSeq         screenSequence
+	screenOp          screenOperation
+	screenActions     chan message
 	screenMode        string
 	screenPendingMode string
 	deviceID          string

@@ -191,3 +191,131 @@ func TestScreenOversizedCaptureAndInvalidInputCleanUpHelper(t *testing.T) {
 		m.closeAll()
 	}
 }
+
+type actionDesktop struct {
+	*fakeDesktop
+	events  chan message
+	calls   chan string
+	text    string
+	failure error
+}
+
+func (f *actionDesktop) Events() <-chan message { return f.events }
+func (f *actionDesktop) Operation(ctx context.Context, kind, text string) (string, error) {
+	f.calls <- kind
+	if kind == "clipboard_set" {
+		f.text = text
+	}
+	return f.text, f.failure
+}
+func TestScreenOperationsAndDesktopChangesRetainStream(t *testing.T) {
+	f := &actionDesktop{fakeDesktop: &fakeDesktop{frames: make(chan desktopFrame, 1), inputs: make(chan screenInput, 8), closed: make(chan struct{})}, events: make(chan message, 4), calls: make(chan string, 4), failure: errors.New("sas_blocked")}
+	sent := make(chan message, 32)
+	mux := &screenMux{launch: func(context.Context) (desktopBridge, error) { return f, nil }, send: func(m message) error { sent <- m; return nil }}
+	defer mux.closeAll()
+	next := func() message {
+		select {
+		case m := <-sent:
+			return m
+		case <-time.After(time.Second):
+			t.Fatal("missing message")
+			return message{}
+		}
+	}
+	mux.handle(message{Type: "screen_open", SessionID: screenTestID})
+	if next().Type != "screen_opened" {
+		t.Fatal("open")
+	}
+	request := message{Type: "screen_operation", SessionID: screenTestID, RequestID: screenTestID, Kind: "sas"}
+	mux.handle(request)
+	if next().Code != "sas_blocked" {
+		t.Fatal("SAS failure")
+	}
+	<-f.calls
+	for i, name := range []string{"Default", "Winlogon", "Default"} {
+		f.events <- message{Type: "screen_event", Stage: "desktop_changed", Desktop: name}
+		if next().Stage != "desktop_changed" {
+			t.Fatal("transition event")
+		}
+		f.frames <- desktopFrame{JPEG: []byte("frame"), Width: 10, Height: 10}
+		frame := next()
+		if frame.FrameID != uint64(i+1) {
+			t.Fatal("frame sequence reset")
+		}
+		mux.handle(message{Type: "screen_ack", SessionID: screenTestID, FrameID: frame.FrameID})
+	}
+	mux.handle(message{Type: "screen_mode", SessionID: screenTestID, Mode: "view"})
+	if next().Mode != "view" {
+		t.Fatal("view")
+	}
+	mux.handle(request)
+	if next().Code != "control_required" {
+		t.Fatal("SAS allowed in View Only")
+	}
+	select {
+	case <-f.calls:
+		t.Fatal("View Only reached OS action")
+	default:
+	}
+	select {
+	case <-f.closed:
+		t.Fatal("operation or desktop transition killed agent Screen route")
+	default:
+	}
+}
+
+func TestScreenClipboardFullSizeCreditedAgentHelperRoundTrip(t *testing.T) {
+	f := &actionDesktop{fakeDesktop: &fakeDesktop{frames: make(chan desktopFrame, 1), inputs: make(chan screenInput, 8), closed: make(chan struct{})}, events: make(chan message, 4), calls: make(chan string, 4)}
+	sent := make(chan message, 2)
+	mux := &screenMux{launch: func(context.Context) (desktopBridge, error) { return f, nil }, send: func(m message) error { sent <- m; return nil }}
+	defer mux.closeAll()
+	next := func() message {
+		select {
+		case m := <-sent:
+			return m
+		case <-time.After(time.Second):
+			t.Fatal("missing operation reply")
+			return message{}
+		}
+	}
+	mux.handle(message{Type: "screen_open", SessionID: screenTestID})
+	next()
+	text := make([]byte, screenClipboardMax)
+	for i := range text {
+		text[i] = 'x'
+	}
+	mux.handle(message{Type: "screen_operation", SessionID: screenTestID, RequestID: screenTestID, Kind: "clipboard_set"})
+	for _, chunk := range clipboardChunks(screenTestID, text) {
+		chunk.SessionID = screenTestID
+		mux.handle(chunk)
+		ack := next()
+		if ack.Type != "screen_clipboard_ack" || ack.Index != chunk.Index {
+			t.Fatal("upload credit")
+		}
+	}
+	if next().Code != "ok" {
+		t.Fatal("set failed")
+	}
+	mux.handle(message{Type: "screen_operation", SessionID: screenTestID, RequestID: screenTestID, Kind: "clipboard_get"})
+	var received []byte
+	for index := 0; index < 64; index++ {
+		chunk := next()
+		if chunk.Type != "screen_clipboard" || chunk.Index != index {
+			t.Fatal("download order")
+		}
+		data, err := base64.StdEncoding.DecodeString(chunk.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		received = append(received, data...)
+		mux.handle(message{Type: "screen_clipboard_ack", SessionID: screenTestID, RequestID: screenTestID, Index: index})
+	}
+	if next().Code != "ok" || string(received) != string(text) {
+		t.Fatal("round trip corrupted")
+	}
+	select {
+	case <-f.closed:
+		t.Fatal("clipboard killed Screen helper")
+	default:
+	}
+}

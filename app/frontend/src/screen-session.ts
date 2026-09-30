@@ -1,5 +1,19 @@
 import type { SessionState } from './ssh-session'
 
+type PendingOperation = {
+ id: string; kind: string; cancelled: boolean; chunks: Uint8Array[]; size: number; count: number; index: number;
+ upload: Uint8Array[]; sent: number; timer: ReturnType<typeof setTimeout>;
+ resolve: (text: string) => void; reject: (error: Error) => void;
+}
+const clipboardMax = 1024 * 1024
+const clipboardChunk = 16384
+const operationErrors: Record<string, string> = {
+ control_required: 'Switch to Control to use this action.', operation_busy: 'A Screen action is already in progress.',
+ operation_timeout: 'Screen action timed out.', sas_blocked: 'Windows policy blocked remote Ctrl+Alt+Del.',
+ sas_unavailable: 'Windows could not send remote Ctrl+Alt+Del.', clipboard_unavailable: 'The Windows clipboard is unavailable.',
+ clipboard_too_large: 'Clipboard text is too large (1 MiB maximum).', invalid_clipboard: 'Invalid Screen clipboard transfer.',
+ operation_cancelled: 'Screen action cancelled.',
+}
 type Input = { action: 'move' | 'button' | 'wheel' | 'key' | 'release'; x?: number; y?: number; button?: number; delta?: number; key?: number; down?: boolean }
 export function windowsKey(code: string): number | undefined {
   if (/^Key[A-Z]$/.test(code)) return code.charCodeAt(3)
@@ -16,6 +30,10 @@ export class ScreenSession {
   readonly protocol = 'Screen' as const
   state: SessionState = 'connecting'
   error = ''
+  clipboardError = ''
+  operationMessage = ''
+  operationBusy = false
+  private pendingOperation: PendingOperation | null = null
   mode: 'control' | 'view' = 'control'
   private socket: WebSocket
   private listeners = new Set<() => void>()
@@ -32,7 +50,7 @@ export class ScreenSession {
     this.socket.binaryType = 'arraybuffer'
     this.socket.onmessage = event => { void this.receive(event.data) }
     this.socket.onerror = () => { this.error = 'Could not connect to Screen Control'; this.state = 'error'; this.notify() }
-    this.socket.onclose = () => { this.closed = true; this.latest = null; if (this.state !== 'error') this.state = 'disconnected'; this.notify() }
+    this.socket.onclose = () => { this.rejectOperation('Screen session ended.'); this.closed = true; this.latest = null; if (this.state !== 'error') this.state = 'disconnected'; this.notify() }
   }
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private notify() { this.listeners.forEach(listener => listener()) }
@@ -54,8 +72,9 @@ export class ScreenSession {
         if (f.type === 'status' && f.state === 'active') this.state = 'connected'
         else if (f.type === 'status' && f.state === 'closed') {
           this.error = ['session_closed', 'browser_disconnected'].includes(f.code) ? '' : f.message || 'Screen session ended'
-          this.state = this.error ? 'error' : 'disconnected'; this.closed = true; this.latest = null
-        } else if (f.type === 'screen_mode' && ['control', 'view'].includes(f.mode)) { this.mode = f.mode; this.changingMode = false }
+          this.rejectOperation('Screen session ended.'); this.state = this.error ? 'error' : 'disconnected'; this.closed = true; this.latest = null
+        } else if (['screen_clipboard', 'screen_clipboard_ack', 'screen_operation_result'].includes(f.type)) this.operationResponse(f)
+        else if (f.type === 'screen_mode' && ['control', 'view'].includes(f.mode)) { this.mode = f.mode; this.changingMode = false }
         else throw new Error()
         this.notify()
       } else throw new Error()
@@ -63,9 +82,106 @@ export class ScreenSession {
   }
   setMode(mode: 'control' | 'view') {
     if (this.state !== 'connected' || this.changingMode) return
+    if (this.pendingOperation) { this.pendingOperation.cancelled = true; this.send({ type: 'screen_operation_cancel', request_id: this.pendingOperation.id }) }
     this.release(); this.changingMode = true
     // Disable input immediately; only the agent acknowledgement can restore control.
     this.mode = 'view'; this.notify(); this.send({ type: 'screen_mode', mode })
+  }
+  get canControl() { return this.state === 'connected' && this.mode === 'control' && !this.changingMode && !this.closed }
+  get hasRemoteClipboard() { return this.canControl && !this.operationBusy }
+  private rejectOperation(message: string) {
+    const pending = this.pendingOperation
+    if (!pending) return
+    clearTimeout(pending.timer); this.pendingOperation = null; this.operationBusy = false
+    pending.chunks = []; pending.upload = []; pending.reject(new Error(message)); this.notify()
+  }
+  private operation(kind: string, bytes?: Uint8Array): Promise<string> {
+    if (!this.canControl || this.operationBusy) return Promise.reject(new Error('Switch to Control to use this action.'))
+    const upload: Uint8Array[] = []
+    if (bytes) for (let offset = 0; offset < bytes.length || offset === 0; offset += clipboardChunk) upload.push(bytes.slice(offset, offset + clipboardChunk))
+    return new Promise((resolve, reject) => {
+      const id = crypto.randomUUID()
+      const timer = setTimeout(() => {
+        if (this.pendingOperation) this.pendingOperation.cancelled = true
+        this.send({ type: 'screen_operation_cancel', request_id: id })
+        // Leave transfer state until the agent acknowledges cancellation, so
+        // already queued chunks can be validated without poisoning the stream.
+        this.clipboardError = 'Screen action timed out.'; this.notify()
+      }, 30000)
+      this.pendingOperation = { id, kind, cancelled: false, chunks: [], size: 0, count: 0, index: 0, upload, sent: 0, timer, resolve, reject }
+      this.operationBusy = true; this.notify()
+      this.send({ type: 'screen_operation', request_id: id, kind })
+      if (kind === 'clipboard_set') this.sendClipboardChunk()
+    })
+  }
+  private sendClipboardChunk() {
+    const op = this.pendingOperation!
+    const bytes = op.upload[op.sent]
+    let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte)
+    this.send({ type: 'screen_clipboard', request_id: op.id, index: op.sent, count: op.upload.length, data: btoa(binary) })
+  }
+  private operationResponse(frame: Record<string, unknown>) {
+    const op = this.pendingOperation
+    if (!op || frame.request_id !== op.id) throw new Error()
+    if (op.cancelled && frame.type !== 'screen_operation_result') return
+    if (frame.type === 'screen_clipboard_ack') {
+      const index = frame.index ?? 0
+      if (op.kind !== 'clipboard_set' || index !== op.sent || op.sent >= op.upload.length) throw new Error()
+      op.sent++
+      if (op.sent < op.upload.length) this.sendClipboardChunk()
+    } else if (frame.type === 'screen_clipboard') {
+      const index = frame.index ?? 0; const count = frame.count
+      if (op.kind !== 'clipboard_get' || index !== op.index || !Number.isInteger(count) || Number(count) < 1 || Number(count) > 64 || op.count && op.count !== count || index >= Number(count) || typeof frame.data !== 'string' || frame.data.length > 21848) throw new Error()
+      const binary = atob(frame.data); const bytes = Uint8Array.from(binary, ch => ch.charCodeAt(0))
+      if (bytes.length > clipboardChunk || index < Number(count) - 1 && bytes.length !== clipboardChunk || !bytes.length && count !== 1 || op.size + bytes.length > clipboardMax) throw new Error()
+      op.chunks.push(bytes); op.size += bytes.length; op.index++; op.count = Number(count)
+      this.send({ type: 'screen_clipboard_ack', request_id: op.id, index })
+    } else {
+      if (frame.kind !== op.kind || typeof frame.code !== 'string' || frame.code !== 'ok' && !(frame.code in operationErrors)) throw new Error()
+      if (op.cancelled && frame.code === 'ok') { this.rejectOperation(operationErrors.operation_cancelled); return }
+      if (frame.code !== 'ok') { this.rejectOperation(operationErrors[frame.code]); return }
+      if (op.kind === 'clipboard_set' && op.sent !== op.upload.length || op.kind === 'clipboard_get' && (!op.count || op.index !== op.count)) throw new Error()
+      const data = new Uint8Array(op.size); let offset = 0
+      for (const chunk of op.chunks) { data.set(chunk, offset); offset += chunk.length }
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(data)
+      if (text.includes('\0')) throw new Error()
+      clearTimeout(op.timer); this.pendingOperation = null; this.operationBusy = false
+      op.chunks = []; op.upload = []; op.resolve(text); this.notify()
+    }
+  }
+  async pasteLocalClipboardToRemote(): Promise<boolean> {
+    this.clipboardError = ''; this.notify()
+    if (!this.canControl || this.operationBusy) return false
+    let text: string
+    try { text = await navigator.clipboard.readText() } catch {
+      this.clipboardError = 'Could not read your clipboard. Check browser clipboard permission.'; this.notify(); return false
+    }
+    if (text.length > clipboardMax) { this.clipboardError = operationErrors.clipboard_too_large; this.notify(); return false }
+    const bytes = new TextEncoder().encode(text)
+    if (bytes.length > clipboardMax || text.includes('\0')) {
+      this.clipboardError = bytes.length > clipboardMax ? operationErrors.clipboard_too_large : operationErrors.invalid_clipboard; this.notify(); return false
+    }
+    try { await this.operation('clipboard_set', bytes); return true } catch (error) {
+      this.clipboardError = (error as Error).message; this.notify(); return false
+    }
+  }
+  async copyRemoteClipboardToLocal(): Promise<boolean> {
+    this.clipboardError = ''; this.notify()
+    if (!this.canControl || this.operationBusy) return false
+    let text: string
+    try { text = await this.operation('clipboard_get') } catch (error) {
+      this.clipboardError = (error as Error).message; this.notify(); return false
+    }
+    try { await navigator.clipboard.writeText(text); return true } catch {
+      this.clipboardError = 'Could not write to your clipboard. Check browser clipboard permission.'; this.notify(); return false
+    }
+  }
+  async sendSAS() {
+    this.operationMessage = ''; this.notify()
+    if (!this.canControl || this.operationBusy) return
+    this.release()
+    try { await this.operation('sas'); this.operationMessage = 'Ctrl+Alt+Del request sent.' } catch (error) { this.operationMessage = (error as Error).message }
+    this.notify()
   }
   release() { if (this.state === 'connected' && this.mode === 'control') this.send({ type: 'screen_input', input: { action: 'release' } }) }
   input(input: Input, active: boolean) {
@@ -119,7 +235,7 @@ export class ScreenSession {
     return () => { attached = false; this.release(); document.removeEventListener('visibilitychange', hidden); if (this.renderFrame === render) this.renderFrame = null; canvas.remove() }
   }
   disconnect() {
-    this.release(); this.send({ type: 'screen_close' }); this.closed = true; this.latest = null
+    this.rejectOperation('Screen session ended.'); this.release(); this.send({ type: 'screen_close' }); this.closed = true; this.latest = null
     this.socket.close(); this.state = 'disconnected'; this.notify()
   }
 }

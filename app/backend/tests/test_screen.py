@@ -668,3 +668,128 @@ def test_capture_stage_diagnostics_remain_safe(client, db, monkeypatch, code):
     assert set(failure.detail) == {"session_id", "credential_id", "reason"}
     db.refresh(device)
     assert device.online
+
+
+def test_screen_explicit_clipboard_sas_and_desktops_preserve_history(client, db, monkeypatch):
+    device = seed(db, capabilities=["screen_control_v1"])
+    as_user(client, db)
+    sid = create(client, device).json()["id"]
+    secret = "clipboard-only secret 世界 😀"
+    rid = str(uuid.uuid4())
+
+    class Gateway:
+        def __init__(self):
+            self.queue = asyncio.Queue()
+            self.sent = []
+            self.clipboard = b""
+            self.kind = ""
+
+        async def emit(self, frame):
+            await self.queue.put(json.dumps({"version": 1, "session_id": sid, **frame}))
+
+        async def send(self, raw):
+            frame = json.loads(raw)
+            self.sent.append(frame)
+            kind = frame["type"]
+            if kind == "screen_open":
+                await self.emit({"type": "screen_opened"})
+                for name in ("Winlogon", "Default", "Winlogon", "Default", "Winlogon"):
+                    await self.emit(
+                        {"type": "screen_event", "stage": "desktop_changed", "desktop": name}
+                    )
+            elif kind == "screen_mode":
+                await self.emit({"type": "screen_mode", "mode": frame["mode"]})
+            elif kind == "screen_operation":
+                self.kind = frame["kind"]
+                if self.kind == "sas":
+                    await self.emit({"type": "screen_event", "stage": "sas_requested"})
+                    await self.result(frame, "sas_blocked")
+                elif self.kind == "clipboard_get":
+                    await self.emit(
+                        {
+                            "type": "screen_clipboard",
+                            "request_id": frame["request_id"],
+                            "index": 0,
+                            "count": 1,
+                            "data": base64.b64encode(self.clipboard).decode(),
+                        }
+                    )
+            elif kind == "screen_clipboard":
+                self.clipboard = base64.b64decode(frame["data"])
+                await self.emit(
+                    {
+                        "type": "screen_clipboard_ack",
+                        "request_id": frame["request_id"],
+                        "index": frame["index"],
+                    }
+                )
+                await self.result(frame, "ok")
+            elif kind == "screen_clipboard_ack":
+                await self.result(frame, "ok")
+
+        async def result(self, frame, code):
+            await self.emit(
+                {
+                    "type": "screen_operation_result",
+                    "request_id": frame["request_id"],
+                    "kind": self.kind,
+                    "code": code,
+                }
+            )
+
+        async def recv(self):
+            return await self.queue.get()
+
+        async def close(self):
+            pass
+
+    gateway = Gateway()
+
+    async def connect(*args, **kwargs):
+        return gateway
+
+    monkeypatch.setattr(screen, "ws_connect", connect)
+    with client.websocket_connect(
+        f"/ws/screen-sessions/{sid}", headers={"Host": "localhost", "Origin": ORIGIN}
+    ) as ws:
+        assert ws.receive_json()["state"] == "active"
+        ws.send_json({"type": "screen_operation", "request_id": rid, "kind": "clipboard_set"})
+        ws.send_json(
+            {
+                "type": "screen_clipboard",
+                "request_id": rid,
+                "index": 0,
+                "count": 1,
+                "data": base64.b64encode(secret.encode()).decode(),
+            }
+        )
+        assert ws.receive_json()["type"] == "screen_clipboard_ack"
+        assert ws.receive_json()["code"] == "ok"
+        ws.send_json({"type": "screen_operation", "request_id": rid, "kind": "clipboard_get"})
+        assert base64.b64decode(ws.receive_json()["data"]).decode() == secret
+        ws.send_json({"type": "screen_clipboard_ack", "request_id": rid, "index": 0})
+        assert ws.receive_json()["code"] == "ok"
+        ws.send_json({"type": "screen_operation", "request_id": rid, "kind": "sas"})
+        assert ws.receive_json()["code"] == "sas_blocked"
+        ws.send_json({"type": "screen_mode", "mode": "view"})
+        assert ws.receive_json()["mode"] == "view"
+        for kind in ("sas", "clipboard_set", "clipboard_get"):
+            ws.send_json({"type": "screen_operation", "request_id": rid, "kind": kind})
+            assert ws.receive_json()["code"] == "control_required"
+        ws.send_json({"type": "screen_close"})
+        assert ws.receive_json()["state"] == "closed"
+    assert len([f for f in gateway.sent if f["type"] == "screen_operation"]) == 3
+    trace = client.get("/api/diagnostics/sessions").json()[0]
+    assert {"desktop_changed", "sas_requested", "session_closed"} <= {
+        e["stage"] for e in trace["stages"]
+    }
+    audit = list(
+        db.scalars(select(AuditEvent).where(AuditEvent.event_type.like("screen_session_%")))
+    )
+    assert [event.event_type for event in audit] == [
+        "screen_session_started",
+        "screen_session_ended",
+    ]
+    assert secret not in json.dumps(trace) + json.dumps([e.detail for e in audit])
+    assert db.get(RemoteSession, uuid.UUID(sid)).state == "closed"
+    assert device.online

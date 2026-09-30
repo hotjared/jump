@@ -108,7 +108,7 @@ function SessionScreen({ session, visible }: { session: ScreenSession; visible: 
   return <div className="workspace-desktop" ref={node} aria-label={`${session.name} Screen desktop`} />
 }
 
-function RdpActions({ session }: { session: RdpSession }) {
+function RdpActions({ session }: { session: RdpSession | ScreenSession }) {
   const [feedback, setFeedback] = useState('')
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current) }, [])
@@ -121,7 +121,7 @@ function RdpActions({ session }: { session: RdpSession }) {
     if (success) timer.current = setTimeout(() => setFeedback(''), 2000)
   }
   return <>
-    <button type="button" className="button" disabled={session.state !== 'connected'} onClick={() => void transfer('paste')}>Paste to Remote</button>
+    <button type="button" className="button" disabled={session.state !== 'connected' || session.protocol === 'Screen' && (!session.canControl || session.operationBusy)} onClick={() => void transfer('paste')}>Paste to Remote</button>
     <button type="button" className="button" disabled={session.state !== 'connected' || !session.hasRemoteClipboard} onClick={() => void transfer('copy')}>Copy from Remote</button>
     {feedback && <span className="clipboard-feedback" role="status">{feedback}</span>}
   </>
@@ -162,10 +162,11 @@ export default function SessionWorkspace({ sessions, activeId, select, close, fi
       className="session-view" key={session.id} hidden={activeId !== session.id}>
       <div className="session-heading"><div><strong>{session.name}</strong><span className="muted">{session.platform} · {session.protocol}</span>
         <span className={`session-state state-${session.state}`}><i />{session.state}</span></div>
-        <div className="session-actions">{fileDevices.includes(session.deviceId) && <button className="button" onClick={() => openFiles(session.deviceId)}>Files</button>}{session.protocol === 'Screen' && <><button className="button" disabled={session.state !== 'connected'} onClick={() => session.setMode(session.mode === 'control' ? 'view' : 'control')}>{session.mode === 'control' ? 'Control · switch to View Only' : 'View Only · switch to Control'}</button><button className="button" onClick={e => e.currentTarget.closest('.session-view')?.requestFullscreen()}>Fullscreen</button></>}{session.protocol === 'RDP' && <><RdpActions session={session} /><button className="button" onClick={e => e.currentTarget.closest('.session-view')?.requestFullscreen()}>Fullscreen</button></>}
+        <div className="session-actions">{fileDevices.includes(session.deviceId) && <button className="button" onClick={() => openFiles(session.deviceId)}>Files</button>}{session.protocol === 'Screen' && <><button className="button" disabled={session.state !== 'connected'} onClick={() => session.setMode(session.mode === 'control' ? 'view' : 'control')}>{session.mode === 'control' ? 'Control · switch to View Only' : 'View Only · switch to Control'}</button><RdpActions session={session} /><button className="button" disabled={!session.canControl || session.operationBusy} onClick={() => void session.sendSAS()}>Ctrl+Alt+Del</button><button className="button" onClick={e => e.currentTarget.closest('.session-view')?.requestFullscreen()}>Fullscreen</button></>}{session.protocol === 'RDP' && <><RdpActions session={session} /><button className="button" onClick={e => e.currentTarget.closest('.session-view')?.requestFullscreen()}>Fullscreen</button></>}
           <button className="button" onClick={() => closeTab(session.id)}>Disconnect</button></div></div>
       {session.error && <p className="session-error" role="alert">{session.error}</p>}
-      {session.protocol === 'RDP' && session.clipboardError && <p className="session-error" role="alert">{session.clipboardError}</p>}
+      {(session.protocol === 'RDP' || session.protocol === 'Screen') && session.clipboardError && <p className="session-error" role="alert">{session.clipboardError}</p>}
+      {session.protocol === 'Screen' && session.operationMessage && <p role="status">{session.operationMessage}</p>}
       {session.protocol === 'SSH' ? <SessionTerminal session={session} visible={activeId === session.id} /> : session.protocol === 'Screen' ? <SessionScreen session={session} visible={activeId === session.id} /> : <SessionDesktop session={session} visible={activeId === session.id} />}
       <div className="session-footer">Jump agent · {session.protocol === 'SSH' ? 'SSH localhost:22' : session.protocol === 'Screen' ? 'Windows console desktop · primary display' : 'RDP localhost:3389'}</div>
     </div>)}
