@@ -131,7 +131,7 @@ type windowsDesktop struct {
 	job           windows.Handle
 	session       uint32
 	once          sync.Once
-	events        chan<- message
+	events        chan message
 	results       chan message
 	operationMu   sync.Mutex
 	resultMu      sync.Mutex
@@ -247,7 +247,7 @@ func (d *windowsDesktop) Close() {
 		windows.CloseHandle(d.pipe.handle)
 	})
 }
-func launchConsoleHelper(ctx context.Context, events chan<- message) (*windowsDesktop, error) {
+func launchConsoleHelper(ctx context.Context, events chan message) (*windowsDesktop, error) {
 	if !screenSupported() {
 		return nil, errors.New("helper_start_failed")
 	}

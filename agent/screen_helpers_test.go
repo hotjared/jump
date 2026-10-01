@@ -16,8 +16,8 @@ func TestConsoleHelperReplacementKeepsEventStream(t *testing.T) {
 		done   <-chan struct{}
 	}
 	var attempts int
-	var shared chan<- message
-	launch, events := screenHelperFactory(func(ctx context.Context, events chan<- message) (*helper, error) {
+	var shared chan message
+	launch, events := screenHelperFactory(func(ctx context.Context, events chan message) (*helper, error) {
 		attempts++
 		if shared == nil {
 			shared = events
