@@ -15,7 +15,7 @@ func (b *broker) screenAgentFrame(agent *websocket.Conn, m message) bool {
 	if r == nil || r.protocol != "screen" || r.agent != agent {
 		return true
 	}
-	valid := m.Version == 1 && validScreenID(m.SessionID)
+	valid := m.Version == 1 && validScreenID(m.SessionID) && (!screenV2Message(m.Type) || r.screenV2)
 	r.screenMu.Lock()
 	ignored := r.screenOp.cancelled && m.RequestID == r.screenOp.id && m.Type != "screen_operation_result" && (m.Type == "screen_clipboard" || m.Type == "screen_clipboard_ack")
 	switch m.Type {
@@ -105,7 +105,7 @@ func (b *broker) internalScreen(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(screenClipboardWireMax)
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var open message
-	if conn.ReadJSON(&open) != nil || open.Version != 1 || open.Type != "screen_open" || open.SessionID != id || open.Input != nil || open.Data != "" {
+	if conn.ReadJSON(&open) != nil || open.Version != 1 || open.Type != "screen_open" || open.SessionID != id || open.Input != nil || open.Data != "" || open.ScreenVersion != 0 && open.ScreenVersion != 1 && open.ScreenVersion != 2 {
 		return
 	}
 	route := &sessionRoute{screenActions: make(chan message, 8), screenMode: "control", deviceID: device, ownerID: user, protocol: "screen", agent: agent, frames: make(chan message, 32), closed: make(chan struct{})}
@@ -117,13 +117,18 @@ func (b *broker) internalScreen(w http.ResponseWriter, r *http.Request) {
 	if b.sessions == nil {
 		b.sessions = make(map[string]*sessionRoute)
 	}
+	route.screenV2 = open.ScreenVersion == 2 && b.screenV2Capabilities[device]
 	b.sessions[id] = route
 	b.mu.Unlock()
 	defer func() {
 		b.closeRoute(id, route)
 		_ = b.write(agent, message{Version: 1, Type: "screen_close", SessionID: id})
 	}()
-	if b.write(agent, message{Version: 1, Type: "screen_open", SessionID: id}) != nil {
+	screenVersion := 0
+	if route.screenV2 {
+		screenVersion = 2
+	}
+	if b.write(agent, message{Version: 1, Type: "screen_open", SessionID: id, ScreenVersion: screenVersion}) != nil {
 		return
 	}
 	conn.SetReadDeadline(time.Time{})
@@ -157,6 +162,24 @@ func (b *broker) internalScreen(w http.ResponseWriter, r *http.Request) {
 			}
 			switch m.Type {
 			case "screen_operation", "screen_clipboard", "screen_clipboard_ack", "screen_operation_cancel":
+				if !route.screenV2 {
+					if !validOperationEnvelope(m) {
+						return
+					}
+					if m.Type == "screen_operation" {
+						var rejected screenOperation
+						if rejected.request(m) != nil {
+							return
+						}
+						reply := message{Version: 1, Type: "screen_operation_result", SessionID: id, RequestID: m.RequestID, Kind: m.Kind, Code: "unsupported_agent"}
+						select {
+						case route.screenActions <- reply:
+						case <-route.closed:
+							return
+						}
+					}
+					continue // Includes upload chunks/cancellation already in flight.
+				}
 				route.screenMu.Lock()
 				err := route.screenOp.request(m)
 				if err == nil && route.screenOp.id == "" {

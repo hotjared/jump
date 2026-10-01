@@ -23,8 +23,8 @@ vi.stubGlobal('PointerEvent', MouseEvent)
 vi.mock('@xterm/xterm', () => ({ Terminal: class {} }))
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: class {} }))
 afterEach(() => vi.restoreAllMocks())
-function active() {
-  const session = new ScreenSession('sid', 'device', 'PC', 'windows')
+function active(capabilities = ['screen_control_v1', 'screen_control_v2']) {
+  const session = new ScreenSession('sid', 'device', 'PC', 'windows', capabilities)
   Socket.last.onmessage?.({ data: JSON.stringify({ type: 'status', state: 'active' }) })
   return session
 }
@@ -40,7 +40,9 @@ describe('screen control', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Screen Control' }))
     await waitFor(() => expect(connected).toHaveBeenCalledOnce())
     expect(mutate).toHaveBeenCalledWith('/api/devices/device/screen-sessions', 'POST', {})
-    expect(connected.mock.calls[0][0].protocol).toBe('Screen'); view.unmount()
+    expect(connected.mock.calls[0][0].protocol).toBe('Screen')
+    expect(connected.mock.calls[0][0].supportsAdminOperations).toBe(false)
+    expect(connected.mock.calls[0][0].capabilities).toEqual(['screen_control_v1']); view.unmount()
   })
   it('renders Screen workspace, Files, mode, fullscreen and disconnect', () => {
     const session = active(); vi.spyOn(session, 'attach').mockReturnValue(() => {})
@@ -187,4 +189,32 @@ it('revokes input immediately when a mode change cancels clipboard, draining que
   expect(await copy).toBe(false)
   opReceive({ type: 'screen_mode', mode: 'view' })
   expect(session.state).toBe('connected'); expect(session.mode).toBe('view'); session.disconnect()
+})
+
+
+it('keeps v1 basic controls while hiding and suppressing v2 operations', async () => {
+  const session = active(['screen_control_v1']); vi.spyOn(session, 'attach').mockReturnValue(() => {})
+  const readText = vi.fn(); const writeText = vi.fn()
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText, writeText } })
+  const view = render(<SessionWorkspace sessions={[session]} activeId={session.id} select={() => {}} close={() => {}} fileDevices={['device']} />)
+  for (const label of ['Paste to Remote', 'Copy from Remote', 'Ctrl+Alt+Del']) expect(screen.queryByRole('button', { name: label })).toBeNull()
+  for (const label of ['Files', 'Control · switch to View Only', 'Fullscreen', 'Disconnect']) expect(screen.getByRole('button', { name: label })).toBeTruthy()
+  expect(screen.getByText('Update the Windows Jump agent to enable unattended admin controls.')).toBeTruthy()
+  expect(session.canControl).toBe(true); expect(session.hasRemoteClipboard).toBe(false)
+  await session.sendSAS()
+  expect(await session.pasteLocalClipboardToRemote()).toBe(false)
+  expect(await session.copyRemoteClipboardToLocal()).toBe(false)
+  expect(readText).not.toHaveBeenCalled(); expect(writeText).not.toHaveBeenCalled()
+  expect(Socket.last.send).not.toHaveBeenCalled()
+  session.input({ action: 'key', key: 65, down: true }, true)
+  expect(opFrames().at(-1)?.type).toBe('screen_input')
+  view.unmount(); session.disconnect()
+})
+
+it('defaults unknown Screen capabilities to basic v1 controls', async () => {
+  const session = new ScreenSession('sid', 'device', 'PC', 'windows')
+  opReceive({ type: 'status', state: 'active' })
+  expect(session.supportsAdminOperations).toBe(false)
+  await session.sendSAS(); expect(opRequest()).toBeUndefined()
+  session.disconnect()
 })

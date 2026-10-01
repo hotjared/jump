@@ -72,7 +72,7 @@ def eligible(device: Device | None) -> None:
         raise HTTPException(409, "Agent identity is revoked")
     if device.os_family != "windows":
         raise HTTPException(409, "Screen Control requires Windows")
-    if "screen_control_v1" not in device.capabilities:
+    if not {"screen_control_v1", "screen_control_v2"}.intersection(device.capabilities):
         raise HTTPException(409, ERRORS["unsupported_agent"])
 
 
@@ -428,6 +428,7 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
         eligible(device)
         if device.connection_id != session.connection_id:
             raise ValueError("agent_disconnected")
+        supports_v2 = "screen_control_v2" in device.capabilities
         address = (
             cfg.broker_internal_url.rstrip("/")
             .replace("http://", "ws://", 1)
@@ -442,7 +443,14 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
         )
         record_stage(db, session.id, "broker_connected")
         await backend.send(
-            json.dumps({"version": 1, "type": "screen_open", "session_id": str(session.id)})
+            json.dumps(
+                {
+                    "version": 1,
+                    "type": "screen_open",
+                    "session_id": str(session.id),
+                    **({"screen_version": 2} if supports_v2 else {}),
+                }
+            )
         )
         first = json.loads(await asyncio.wait_for(backend.recv(), 15))
         if first.get("version") != 1 or first.get("session_id") != str(session.id):
@@ -515,6 +523,20 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
                 if kind not in allowed or set(frame) != allowed[kind]:
                     raise ValueError("invalid_frame")
                 if kind in OPERATION_FIELDS:
+                    if not supports_v2:
+                        if kind == "screen_operation":
+                            rejected = ScreenOperation()
+                            rejected.request(frame)
+                            await ws.send_json(
+                                {
+                                    "type": "screen_operation_result",
+                                    "request_id": rejected.id,
+                                    "kind": rejected.kind,
+                                    "code": "unsupported_agent",
+                                    "message": OPERATION_CODES["unsupported_agent"],
+                                }
+                            )
+                        continue  # Suppress upload chunks/cancel already in flight too.
                     operation.request(frame)
                     if not operation.id:
                         continue  # Late credit/cancel cannot revive a completed operation.
@@ -560,6 +582,13 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
                 if frame.get("version") != 1 or frame.get("session_id") != str(session.id):
                     raise ValueError("invalid_frame")
                 kind = frame.get("type")
+                if not supports_v2 and kind in {
+                    "screen_event",
+                    "screen_operation_result",
+                    "screen_clipboard",
+                    "screen_clipboard_ack",
+                }:
+                    raise ValueError("invalid_frame")
                 if kind == "screen_frame":
                     if waiting:
                         raise ValueError("invalid_frame")

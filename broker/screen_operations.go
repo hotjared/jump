@@ -30,7 +30,7 @@ func safeScreenEvent(m message) bool {
 }
 func safeOperationCode(code string) bool {
 	switch code {
-	case "ok", "control_required", "operation_busy", "operation_timeout", "operation_cancelled", "sas_blocked", "sas_unavailable", "clipboard_unavailable", "clipboard_too_large", "invalid_clipboard":
+	case "unsupported_agent", "ok", "control_required", "operation_busy", "operation_timeout", "operation_cancelled", "sas_blocked", "sas_unavailable", "clipboard_unavailable", "clipboard_too_large", "invalid_clipboard":
 		return true
 	}
 	return false
@@ -180,4 +180,12 @@ func clipboardChunks(id string, data []byte) []message {
 		chunks = append(chunks, message{Type: "screen_clipboard", RequestID: id, Index: i, Count: count, Data: base64.StdEncoding.EncodeToString(data[i*screenChunkBytes : min(len(data), (i+1)*screenChunkBytes)])})
 	}
 	return chunks
+}
+
+func screenV2Message(kind string) bool {
+	switch kind {
+	case "screen_operation", "screen_clipboard", "screen_clipboard_ack", "screen_operation_cancel", "screen_operation_result", "screen_event":
+		return true
+	}
+	return false
 }

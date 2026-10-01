@@ -674,7 +674,7 @@ def test_capture_and_desktop_failure_diagnostics_remain_safe(client, db, monkeyp
 
 
 def test_screen_explicit_clipboard_sas_and_desktops_preserve_history(client, db, monkeypatch):
-    device = seed(db, capabilities=["screen_control_v1"])
+    device = seed(db, capabilities=["screen_control_v1", "screen_control_v2"])
     as_user(client, db)
     sid = create(client, device).json()["id"]
     secret = "clipboard-only secret 世界 😀"
@@ -796,3 +796,78 @@ def test_screen_explicit_clipboard_sas_and_desktops_preserve_history(client, db,
     assert secret not in json.dumps(trace) + json.dumps([e.detail for e in audit])
     assert db.get(RemoteSession, uuid.UUID(sid)).state == "closed"
     assert device.online
+
+
+@pytest.mark.parametrize("capabilities", [["screen_control_v1"], ["screen_control_v2"]])
+def test_screen_capability_negotiation_and_v1_operation_isolation(
+    client, db, monkeypatch, capabilities
+):
+    device = seed(db, capabilities=capabilities)
+    as_user(client, db)
+    sid = create(client, device).json()["id"]
+    rid = str(uuid.uuid4())
+    supports_v2 = "screen_control_v2" in capabilities
+
+    class Gateway:
+        def __init__(self):
+            self.queue = asyncio.Queue()
+            self.sent = []
+
+        async def send(self, raw):
+            frame = json.loads(raw)
+            self.sent.append(frame)
+            if frame["type"] in ("screen_open", "screen_mode"):
+                reply = {"version": 1, "session_id": sid, "type": "screen_opened"}
+                if frame["type"] == "screen_mode":
+                    reply.update(type="screen_mode", mode=frame["mode"])
+                await self.queue.put(json.dumps(reply))
+
+        async def recv(self):
+            return await self.queue.get()
+
+        async def close(self):
+            pass
+
+    gateway = Gateway()
+
+    async def connect(*args, **kwargs):
+        return gateway
+
+    monkeypatch.setattr(screen, "ws_connect", connect)
+    with client.websocket_connect(
+        f"/ws/screen-sessions/{sid}", headers={"Host": "localhost", "Origin": ORIGIN}
+    ) as ws:
+        assert ws.receive_json()["state"] == "active"
+        assert gateway.sent[0].get("screen_version", 1) == (2 if supports_v2 else 1)
+        if not supports_v2:
+            for kind in ("sas", "clipboard_set", "clipboard_get"):
+                ws.send_json({"type": "screen_operation", "request_id": rid, "kind": kind})
+                result = ws.receive_json()
+                assert result["code"] == "unsupported_agent" and result["kind"] == kind
+            # These can already be in flight when the request is rejected.
+            ws.send_json(
+                {
+                    "type": "screen_clipboard",
+                    "request_id": rid,
+                    "index": 0,
+                    "count": 1,
+                    "data": "eA==",
+                }
+            )
+            ws.send_json({"type": "screen_clipboard_ack", "request_id": rid, "index": 0})
+            ws.send_json({"type": "screen_operation_cancel", "request_id": rid})
+        ws.send_json({"type": "screen_mode", "mode": "view"})
+        assert ws.receive_json()["mode"] == "view"
+        ws.send_json({"type": "screen_mode", "mode": "control"})
+        assert ws.receive_json()["mode"] == "control"
+        ws.send_json({"type": "screen_input", "input": {"action": "key", "key": 65}})
+        ws.send_json({"type": "screen_close"})
+        assert ws.receive_json()["state"] == "closed"
+    assert [f["type"] for f in gateway.sent] == [
+        "screen_open",
+        "screen_mode",
+        "screen_mode",
+        "screen_input",
+    ]
+    assert device.online
+    assert db.get(RemoteSession, uuid.UUID(sid)).state == "closed"

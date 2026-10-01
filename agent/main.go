@@ -50,6 +50,7 @@ type identity struct {
 	PrivateKey string `json:"private_key"`
 }
 type message struct {
+	ScreenVersion int          `json:"screen_version,omitempty"`
 	RequestID     string       `json:"request_id,omitempty"`
 	Stage         string       `json:"stage,omitempty"`
 	Desktop       string       `json:"desktop,omitempty"`
@@ -129,9 +130,7 @@ func info() metadata {
 		}
 	}
 	caps := capabilitiesFor(runtime.GOOS, runtime.GOARCH)
-	if screenSupported() {
-		caps = append(caps, "screen_control_v1")
-	}
+	caps = appendScreenCapabilities(caps, screenSupported())
 	username := ""
 	if current != nil {
 		username = current.Username

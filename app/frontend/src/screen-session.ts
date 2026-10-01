@@ -13,6 +13,7 @@ const operationErrors: Record<string, string> = {
  sas_unavailable: 'Windows could not send remote Ctrl+Alt+Del.', clipboard_unavailable: 'The Windows clipboard is unavailable.',
  clipboard_too_large: 'Clipboard text is too large (1 MiB maximum).', invalid_clipboard: 'Invalid Screen clipboard transfer.',
  operation_cancelled: 'Screen action cancelled.',
+ unsupported_agent: 'Update the Windows Jump agent to enable unattended admin controls.',
 }
 type Input = { action: 'move' | 'button' | 'wheel' | 'key' | 'release'; x?: number; y?: number; button?: number; delta?: number; key?: number; down?: boolean }
 export function windowsKey(code: string): number | undefined {
@@ -43,7 +44,7 @@ export class ScreenSession {
   private changingMode = false
   private lastFrame = 0
 
-  constructor(public id: string, public deviceId: string, public name: string, public platform: string) {
+  constructor(public id: string, public deviceId: string, public name: string, public platform: string, public readonly capabilities: readonly string[] = []) {
     const url = new URL(`/ws/screen-sessions/${id}`, location.href)
     url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
     this.socket = new WebSocket(url)
@@ -88,7 +89,8 @@ export class ScreenSession {
     this.mode = 'view'; this.notify(); this.send({ type: 'screen_mode', mode })
   }
   get canControl() { return this.state === 'connected' && this.mode === 'control' && !this.changingMode && !this.closed }
-  get hasRemoteClipboard() { return this.canControl && !this.operationBusy }
+  get supportsAdminOperations() { return this.capabilities.includes('screen_control_v2') }
+  get hasRemoteClipboard() { return this.supportsAdminOperations && this.canControl && !this.operationBusy }
   private rejectOperation(message: string) {
     const pending = this.pendingOperation
     if (!pending) return
@@ -96,6 +98,7 @@ export class ScreenSession {
     pending.chunks = []; pending.upload = []; pending.reject(new Error(message)); this.notify()
   }
   private operation(kind: string, bytes?: Uint8Array): Promise<string> {
+    if (!this.supportsAdminOperations) return Promise.reject(new Error(operationErrors.unsupported_agent))
     if (!this.canControl || this.operationBusy) return Promise.reject(new Error('Switch to Control to use this action.'))
     const upload: Uint8Array[] = []
     if (bytes) for (let offset = 0; offset < bytes.length || offset === 0; offset += clipboardChunk) upload.push(bytes.slice(offset, offset + clipboardChunk))
@@ -151,7 +154,7 @@ export class ScreenSession {
   }
   async pasteLocalClipboardToRemote(): Promise<boolean> {
     this.clipboardError = ''; this.notify()
-    if (!this.canControl || this.operationBusy) return false
+    if (!this.supportsAdminOperations || !this.canControl || this.operationBusy) return false
     let text: string
     try { text = await navigator.clipboard.readText() } catch {
       this.clipboardError = 'Could not read your clipboard. Check browser clipboard permission.'; this.notify(); return false
@@ -167,7 +170,7 @@ export class ScreenSession {
   }
   async copyRemoteClipboardToLocal(): Promise<boolean> {
     this.clipboardError = ''; this.notify()
-    if (!this.canControl || this.operationBusy) return false
+    if (!this.supportsAdminOperations || !this.canControl || this.operationBusy) return false
     let text: string
     try { text = await this.operation('clipboard_get') } catch (error) {
       this.clipboardError = (error as Error).message; this.notify(); return false
@@ -178,7 +181,7 @@ export class ScreenSession {
   }
   async sendSAS() {
     this.operationMessage = ''; this.notify()
-    if (!this.canControl || this.operationBusy) return
+    if (!this.supportsAdminOperations || !this.canControl || this.operationBusy) return
     this.release()
     try { await this.operation('sas'); this.operationMessage = 'Ctrl+Alt+Del request sent.' } catch (error) { this.operationMessage = (error as Error).message }
     this.notify()

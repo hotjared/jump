@@ -25,6 +25,7 @@ type desktopOperations interface {
 }
 
 type screenStream struct {
+	v2       bool
 	ctx      context.Context
 	cancel   context.CancelFunc
 	input    chan message
@@ -72,7 +73,7 @@ func (m *screenMux) handle(msg message) bool {
 			return true
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		s = &screenStream{ctx: ctx, cancel: cancel, input: make(chan message, 64), ack: make(chan uint64, 1), closed: make(chan struct{}), finished: make(chan struct{})}
+		s = &screenStream{v2: msg.ScreenVersion == 2, ctx: ctx, cancel: cancel, input: make(chan message, 64), ack: make(chan uint64, 1), closed: make(chan struct{}), finished: make(chan struct{})}
 		m.mu.Lock()
 		if m.stream != nil {
 			m.mu.Unlock()
@@ -86,6 +87,9 @@ func (m *screenMux) handle(msg message) bool {
 	}
 	if s == nil || id != msg.SessionID {
 		return true
+	}
+	if !s.v2 && screenV2Message(msg.Type) {
+		return true // A legacy server never negotiates or receives v2 traffic.
 	}
 	switch msg.Type {
 	case "screen_close":
@@ -226,7 +230,7 @@ func (m *screenMux) run(s *screenStream, id string) {
 		case <-s.ctx.Done():
 			return
 		case event := <-events:
-			if safeScreenEvent(event) && !sendOperation(event) {
+			if s.v2 && safeScreenEvent(event) && !sendOperation(event) {
 				return
 			}
 		case <-tick.C:
@@ -392,4 +396,20 @@ func discoverDesktopSession(discover func() uint32, usable func(uint32) bool) (u
 		return 0, false
 	}
 	return id, true
+}
+
+// Advertise the base protocol too, for servers predating v2 negotiation.
+func appendScreenCapabilities(caps []string, supported bool) []string {
+	if supported {
+		return append(caps, "screen_control_v1", "screen_control_v2")
+	}
+	return caps
+}
+
+func screenV2Message(kind string) bool {
+	switch kind {
+	case "screen_operation", "screen_clipboard", "screen_clipboard_ack", "screen_operation_cancel", "screen_operation_result", "screen_event":
+		return true
+	}
+	return false
 }

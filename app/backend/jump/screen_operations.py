@@ -9,6 +9,7 @@ CLIPBOARD_CHUNK = 16384
 CLIPBOARD_WIRE_MAX = 24576
 OPERATION_CODES = {
     "ok": "",
+    "unsupported_agent": "Update the Windows Jump agent to enable unattended admin controls.",
     "operation_cancelled": "Screen action cancelled.",
     "control_required": "Switch to Control to use this action.",
     "operation_busy": "A Screen action is already in progress.",

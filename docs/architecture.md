@@ -67,7 +67,7 @@ Terminal bytes are forwarded with bounded frames and are never persisted.
 
 Browser → authenticated Jump WebSocket → private bearer-authenticated broker screen route → existing Ed25519-authenticated outbound agent connection → private local named pipe → interactive desktop helper.
 
-Screen Control uses `RemoteSession.protocol = "screen"`, the existing workspace, session Diagnostics and Audit Log. Session creation requires an administrator, an online Windows device, a non-revoked identity and `screen_control_v1`. The session snapshots the device connection ID and reserves one controller per device with a partial unique database index. Browser attachment is one-shot; the broker rechecks ownership and the exact connection through the backend before routing.
+Screen Control uses `RemoteSession.protocol = "screen"`, the existing workspace, session Diagnostics and Audit Log. Session creation requires an administrator, an online Windows device, a non-revoked identity and `screen_control_v1` or `screen_control_v2`. The session snapshots the device connection ID and reserves one controller per device with a partial unique database index. Browser attachment is one-shot; the broker rechecks ownership and the exact connection through the backend before routing.
 
 The service discovers the physical console session using `WTSGetActiveConsoleSessionId` and validates its WTS state (Active, Connected or Init). No logged-on user token is needed, including before sign-in. It duplicates its LocalSystem primary token, sets its session ID, and launches the protected installed `jump-agent.exe internal-desktop-helper` on `winsta0\default`. The helper is privileged so ordinary elevated application windows can receive input where Windows permits it. It never loads enrollment identity, receives server credentials or opens a network connection. Its environment contains only SystemRoot. A service-owned kill-on-close Windows Job Object prevents orphan helpers, including after a service crash.
 
@@ -189,3 +189,25 @@ Screen session** throughout this physical-console flow:
 
 No Support Links, temporary agents, attended consent, recording, audio,
 additional monitors, drag/drop or policy modification are included.
+
+### Screen protocol rolling upgrades
+
+Supported Windows service agents advertise both `screen_control_v1` and
+`screen_control_v2`. The unattended-console operations and events use v2.
+Capability decisions use advertised metadata, never agent version strings.
+A v1-only agent retains basic capture/input, mode switching, Files, Fullscreen
+and Disconnect. The workspace hides clipboard/SAS actions and explains that
+updating the Windows agent enables unattended admin controls.
+
+The backend binds v2 support to the session's current connection metadata.
+The broker independently checks the authenticated connection's capabilities
+and snapshots support onto its route. Both suppress v2-only browser traffic
+to a v1 agent and return a safe `unsupported_agent` operation result, without
+closing the basic Screen session or agent presence.
+
+New servers request `screen_version: 2` in `screen_open` only for v2 agents.
+The broker forwards that negotiation only when the connected agent supports
+v2. The envelope remains `version: 1`; frames/input/modes are unchanged.
+Without explicit v2 negotiation, the new agent suppresses v2 operations and
+drains desktop events without sending them to the server. Thus an older server
+that only checks v1 still receives the basic protocol it understands.

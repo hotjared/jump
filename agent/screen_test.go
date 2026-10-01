@@ -222,7 +222,7 @@ func TestScreenOperationsAndDesktopChangesRetainStream(t *testing.T) {
 			return message{}
 		}
 	}
-	mux.handle(message{Type: "screen_open", SessionID: screenTestID})
+	mux.handle(message{Type: "screen_open", SessionID: screenTestID, ScreenVersion: 2})
 	if next().Type != "screen_opened" {
 		t.Fatal("open")
 	}
@@ -278,7 +278,7 @@ func TestScreenClipboardFullSizeCreditedAgentHelperRoundTrip(t *testing.T) {
 			return message{}
 		}
 	}
-	mux.handle(message{Type: "screen_open", SessionID: screenTestID})
+	mux.handle(message{Type: "screen_open", SessionID: screenTestID, ScreenVersion: 2})
 	next()
 	text := make([]byte, screenClipboardMax)
 	for i := range text {
@@ -316,6 +316,63 @@ func TestScreenClipboardFullSizeCreditedAgentHelperRoundTrip(t *testing.T) {
 	select {
 	case <-f.closed:
 		t.Fatal("clipboard killed Screen helper")
+	default:
+	}
+}
+
+func TestScreenCapabilitiesKeepV1ForLegacyServers(t *testing.T) {
+	caps := appendScreenCapabilities([]string{"filesystem"}, true)
+	v1, v2 := false, false
+	for _, cap := range caps {
+		v1 = v1 || cap == "screen_control_v1"
+		v2 = v2 || cap == "screen_control_v2"
+	}
+	if !v1 || !v2 {
+		t.Fatal("supported Windows agent must advertise both Screen protocols")
+	}
+	if got := appendScreenCapabilities([]string{"filesystem"}, false); len(got) != 1 {
+		t.Fatal("unsupported agent advertised Screen")
+	}
+}
+
+func TestLegacyScreenServerReceivesOnlyV1Traffic(t *testing.T) {
+	f := &actionDesktop{fakeDesktop: &fakeDesktop{frames: make(chan desktopFrame, 1), inputs: make(chan screenInput, 8), closed: make(chan struct{})}, events: make(chan message, 4), calls: make(chan string, 4)}
+	sent := make(chan message, 32)
+	mux := &screenMux{launch: func(context.Context) (desktopBridge, error) { return f, nil }, send: func(m message) error { sent <- m; return nil }}
+	defer mux.closeAll()
+	next := func() message {
+		select {
+		case m := <-sent:
+			return m
+		case <-time.After(time.Second):
+			t.Fatal("missing v1 message")
+			return message{}
+		}
+	}
+	// Old servers check v1 and send the original open without negotiation.
+	mux.handle(message{Type: "screen_open", SessionID: screenTestID})
+	if next().Type != "screen_opened" {
+		t.Fatal("legacy open failed")
+	}
+	for _, name := range []string{"Default", "Winlogon", "Default"} {
+		f.events <- message{Type: "screen_event", Stage: "desktop_changed", Desktop: name}
+	}
+	mux.handle(message{Type: "screen_operation", SessionID: screenTestID, RequestID: screenTestID, Kind: "sas"})
+	mux.handle(message{Type: "screen_mode", SessionID: screenTestID, Mode: "view"})
+	if next().Mode != "view" {
+		t.Fatal("v2 message leaked to legacy server")
+	}
+	mux.handle(message{Type: "screen_mode", SessionID: screenTestID, Mode: "control"})
+	if next().Mode != "control" {
+		t.Fatal("v1 mode switching failed")
+	}
+	f.frames <- desktopFrame{JPEG: []byte("frame"), Width: 10, Height: 10}
+	if next().Type != "screen_frame" {
+		t.Fatal("v1 frame failed")
+	}
+	select {
+	case <-f.calls:
+		t.Fatal("unnegotiated operation reached helper")
 	default:
 	}
 }
