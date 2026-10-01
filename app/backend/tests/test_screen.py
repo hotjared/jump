@@ -868,6 +868,7 @@ def test_screen_capability_negotiation_and_v1_operation_isolation(
         "screen_mode",
         "screen_mode",
         "screen_input",
+        "screen_close",
     ]
     assert device.online
     assert db.get(RemoteSession, uuid.UUID(sid)).state == "closed"
