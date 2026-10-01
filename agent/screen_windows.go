@@ -367,14 +367,16 @@ func launchConsoleHelper(ctx context.Context, events chan message) (*windowsDesk
 	ok = true
 	return d, nil
 }
-func openScreenDesktop() (uintptr, string) {
-	h, _, _ := screenUser32.NewProc("OpenInputDesktop").Call(0, 0, 0x81) // READOBJECTS | WRITEOBJECTS
+func openScreenDesktop(trace *screenRuntimeTrace) (uintptr, string) {
+	h, _, e := screenUser32.NewProc("OpenInputDesktop").Call(0, 0, uintptr(screenInputDesktopAccess()))
+	trace.record("desktop_open", "", h != 0, screenWin32Code(e), "")
 	if h == 0 {
 		return 0, ""
 	}
 	var name [256]uint16
 	var size uint32
-	r, _, _ := screenUser32.NewProc("GetUserObjectInformationW").Call(h, 2, uintptr(unsafe.Pointer(&name[0])), 512, uintptr(unsafe.Pointer(&size)))
+	r, _, e := screenUser32.NewProc("GetUserObjectInformationW").Call(h, 2, uintptr(unsafe.Pointer(&name[0])), 512, uintptr(unsafe.Pointer(&size)))
+	trace.record("desktop_name", windows.UTF16ToString(name[:]), r != 0, screenWin32Code(e), "")
 	if r == 0 {
 		screenUser32.NewProc("CloseDesktop").Call(h)
 		return 0, ""
@@ -430,6 +432,9 @@ func desktopHelper(args []string) error {
 	}()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	trace, closeTrace := newScreenRuntimeTrace()
+	defer closeTrace()
+	inject := func(in screenInput) bool { return injectScreenInput(in, trace) }
 	keys := make(map[int]bool)
 	buttons := make(map[int]bool)
 	releasedKeys, releasedButtons := make(map[int]bool), make(map[int]bool)
@@ -440,24 +445,31 @@ func desktopHelper(args []string) error {
 			} else {
 				releasedButtons[in.Button] = true
 			}
-			injectScreenInput(in)
 		}
+		retryScreenReleases(releasedKeys, releasedButtons, inject)
 	}
 
 	defer release()
 	original, _, _ := screenUser32.NewProc("GetThreadDesktop").Call(uintptr(windows.GetCurrentThreadId()))
 	var follower desktopFollower
 	closeDesktop := func(h uintptr) { screenUser32.NewProc("CloseDesktop").Call(h) }
-	attach := func(h uintptr) bool { r, _, _ := screenUser32.NewProc("SetThreadDesktop").Call(h); return r != 0 }
+	attach := func(h uintptr) bool {
+		r, _, e := screenUser32.NewProc("SetThreadDesktop").Call(h)
+		if r != 0 {
+			delete(trace.last, "desktop_attach")
+		}
+		trace.record("desktop_attach", "", r != 0, screenWin32Code(e), "")
+		return r != 0
+	}
 	defer func() {
 		release()
 		if follower.handle != 0 && attach(original) {
 			closeDesktop(follower.handle)
 		}
 	}()
-	var gap time.Time
+	var gap, releaseGap time.Time
 	follow := func() (bool, bool, error) {
-		h, name := openScreenDesktop()
+		h, name := openScreenDesktop(trace)
 		if h == 0 {
 			release()
 			if gap.IsZero() {
@@ -478,15 +490,17 @@ func desktopHelper(args []string) error {
 		for b := range buttons {
 			oldButtons[b] = true
 		}
+		oldReceivingInput := false
 		if follower.handle != 0 {
 			var active int32
 			var size uint32
-			r, _, _ := screenUser32.NewProc("GetUserObjectInformationW").Call(follower.handle, 6, uintptr(unsafe.Pointer(&active)), 4, uintptr(unsafe.Pointer(&size)))
-			if r != 0 && active == 0 {
-				follower.name = ""
-			}
+			r, _, e := screenUser32.NewProc("GetUserObjectInformationW").Call(follower.handle, 6, uintptr(unsafe.Pointer(&active)), 4, uintptr(unsafe.Pointer(&size)))
+			queried := r != 0 && size >= 4
+			trace.record("desktop_old_input", follower.name, queried, screenWin32Code(e), "")
+			oldReceivingInput = desktopAttachmentReliable(queried, active != 0)
+			trace.record("desktop_old_active", follower.name, oldReceivingInput, 0, "")
 		}
-		changed, err := follower.follow(h, name, release, attach, closeDesktop)
+		changed, err := follower.follow(h, name, oldReceivingInput, release, attach, closeDesktop)
 		if err != nil {
 			if gap.IsZero() {
 				gap = time.Now()
@@ -505,20 +519,31 @@ func desktopHelper(args []string) error {
 		}
 		if changed || len(releasedKeys) > 0 || len(releasedButtons) > 0 {
 			for k := range oldKeys {
-				injectScreenInput(screenInput{Action: "key", Key: k})
+				releasedKeys[k] = true
 			}
 			for b := range oldButtons {
-				injectScreenInput(screenInput{Action: "button", Button: b})
+				releasedButtons[b] = true
 			}
-			clear(releasedKeys)
-			clear(releasedButtons)
+			release() // Failed releases stay pending until an attached desktop accepts them.
 		}
 		if changed {
+			trace.resetCapture()
+			trace.record("desktop_changed", name, true, 0, "")
 			stage := "desktop_changed"
 			if initial {
 				stage = "desktop_attached"
 			}
 			_ = pipe.send(helperFrame{Operation: &message{Type: "screen_event", Stage: stage, Desktop: safeDesktopName(name)}})
+		}
+		if len(releasedKeys) > 0 || len(releasedButtons) > 0 {
+			if releaseGap.IsZero() {
+				releaseGap = time.Now()
+			}
+			if time.Since(releaseGap) > 5*time.Second {
+				return false, changed, errors.New("input_failed")
+			}
+		} else {
+			releaseGap = time.Time{}
 		}
 		return true, changed, nil
 	}
@@ -601,26 +626,40 @@ func desktopHelper(args []string) error {
 			if !ready {
 				continue
 			}
-			if changed && in.Action != "release" {
+			if changed && in.Action != "release" && !screenInputSafeAfterDesktopChange(in) {
 				continue
-			} // Never replay an old-desktop key-down.
+			} // Never replay an old-desktop press or wheel.
 			if in.Action == "release" {
 				release()
+				if len(releasedKeys) > 0 || len(releasedButtons) > 0 {
+					ready, changed, err := follow()
+					if err != nil {
+						return fail(screenFailure(err))
+					}
+					if changed {
+						first = true
+					}
+					if !ready || changed && (len(releasedKeys) > 0 || len(releasedButtons) > 0) {
+						continue
+					}
+					if len(releasedKeys) > 0 || len(releasedButtons) > 0 {
+						return fail("input_failed")
+					}
+				}
 				if pipe.send(helperFrame{Released: true}) != nil {
 					return errors.New("input_failed")
 				}
 				continue
 			}
-			if !injectScreenInput(in) {
-				ready, changed, err := follow()
-				if err != nil {
-					return fail(screenFailure(err))
-				}
-				if !ready || changed {
-					first = true
-					continue
-				}
-				return fail("input_failed")
+			delivered, changed, err := deliverDesktopInput(in, inject, follow, release)
+			if changed {
+				first = true
+			}
+			if err != nil {
+				return fail(screenFailure(err))
+			}
+			if !delivered {
+				continue
 			}
 			if in.Action == "key" {
 				if in.Down {
@@ -650,7 +689,17 @@ func desktopHelper(args []string) error {
 			if !ready {
 				continue
 			}
+			if first {
+				trace.record("capture_first_attempt", follower.name, true, 0, "")
+			}
 			f, e := capturePrimary()
+			if first {
+				code := ""
+				if e != nil {
+					code = screenFailure(e)
+				}
+				trace.record("capture_first_result", follower.name, e == nil, 0, code)
+			}
 			if e != nil {
 				ready, changed, err := follow()
 				if err != nil {
@@ -673,11 +722,15 @@ func desktopHelper(args []string) error {
 			if !first && digest == last {
 				continue
 			}
-			first = false
 			last = digest
-			if e = pipe.send(helperFrame{Data: f.JPEG, Width: f.Width, Height: f.Height}); e != nil {
+			e = pipe.send(helperFrame{Data: f.JPEG, Width: f.Width, Height: f.Height})
+			if first {
+				trace.record("frame_first_sent", follower.name, e == nil, 0, "")
+			}
+			if e != nil {
 				return e
 			}
+			first = false
 		}
 	}
 }
@@ -818,7 +871,7 @@ func drawCaptureCursor(dc uintptr, scaleX, scaleY float64) {
 		uintptr(max(1, int(32*scaleX))), uintptr(max(1, int(32*scaleY))), 0, 0, 3,
 	)
 }
-func injectScreenInput(in screenInput) bool {
+func injectScreenInput(in screenInput, trace *screenRuntimeTrace) bool {
 	if !validScreenInput(&in) {
 		return false
 	}
@@ -854,6 +907,7 @@ func injectScreenInput(in screenInput) bool {
 		}
 		binary.LittleEndian.PutUint32(raw[20:], flags)
 	}
-	r, _, _ := screenUser32.NewProc("SendInput").Call(1, uintptr(unsafe.Pointer(&raw[0])), 40)
+	r, _, e := screenUser32.NewProc("SendInput").Call(1, uintptr(unsafe.Pointer(&raw[0])), 40)
+	trace.record("send_input", "", r == 1, screenWin32Code(e), "")
 	return r == 1
 }

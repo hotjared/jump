@@ -40,7 +40,7 @@ func TestDesktopLifecycleTransitionsKeepAttachmentAndReleaseHeldInput(t *testing
 		held := true
 		for i, name := range sequence {
 			actions = nil
-			changed, err := follower.follow(uintptr(i+1), name, func() { held = false; actions = append(actions, "release") }, func(uintptr) bool { actions = append(actions, "attach"); return true }, func(uintptr) { actions = append(actions, "close") })
+			changed, err := follower.follow(uintptr(i+1), name, true, func() { held = false; actions = append(actions, "release") }, func(uintptr) bool { actions = append(actions, "attach"); return true }, func(uintptr) { actions = append(actions, "close") })
 			expected := []string{"release", "attach"}
 			if i > 0 {
 				expected = append(expected, "close")
@@ -50,7 +50,7 @@ func TestDesktopLifecycleTransitionsKeepAttachmentAndReleaseHeldInput(t *testing
 			}
 			held = true
 			actions = nil
-			changed, err = follower.follow(100, name, func() { held = false }, func(uintptr) bool { t.Fatal("reattached unchanged desktop"); return true }, func(h uintptr) {
+			changed, err = follower.follow(100, name, true, func() { held = false }, func(uintptr) bool { t.Fatal("reattached unchanged desktop"); return true }, func(h uintptr) {
 				if h != 100 {
 					t.Fatal("closed current desktop")
 				}
@@ -65,11 +65,11 @@ func TestDesktopFailedAttachPreservesOldOwnership(t *testing.T) {
 	d := desktopFollower{handle: 1, name: "Default"}
 	closed := uintptr(0)
 	released := false
-	_, err := d.follow(2, "Winlogon", func() { released = true }, func(uintptr) bool { return false }, func(h uintptr) { closed = h })
+	_, err := d.follow(2, "Winlogon", true, func() { released = true }, func(uintptr) bool { return false }, func(h uintptr) { closed = h })
 	if err == nil || err.Error() != "desktop_switch_failed" || d.handle != 1 || closed != 2 || !released {
 		t.Fatal(d, closed, err)
 	}
-	_, err = d.follow(0, "", func() {}, func(uintptr) bool { return true }, func(uintptr) { t.Fatal("closed missing desktop") })
+	_, err = d.follow(0, "", false, func() {}, func(uintptr) bool { return true }, func(uintptr) { t.Fatal("closed missing desktop") })
 	if err == nil || screenFailure(err) != "desktop_open_failed" {
 		t.Fatal("unsafe error mapping")
 	}

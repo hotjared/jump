@@ -211,3 +211,47 @@ v2. The envelope remains `version: 1`; frames/input/modes are unchanged.
 Without explicit v2 negotiation, the new agent suppresses v2 operations and
 drains desktop events without sending them to the server. Thus an older server
 that only checks v1 still receives the basic protocol it understands.
+
+### Installed Windows input and attachment troubleshooting
+
+The capture/input helper opens the physical input desktop with the named
+READOBJECTS, WRITEOBJECTS and JOURNALPLAYBACK rights (0xA1). It never requests
+GENERIC_ALL, changes desktop ACLs, disables UAC, or switches the visible desktop.
+An old desktop is reusable only if its UOI_IO query succeeds and says it is
+receiving input. A failed query forces a fresh attachment even when both objects
+are named Default. SendInput recovery checks the desktop and retries at most
+once. Old presses/wheel events are discarded across transitions; moves and
+releases may be delivered after attachment. Failed releases remain pending,
+with a five-second recovery bound. Failed input is never recorded as delivered.
+
+Runtime-only troubleshooting records are written to the **local Windows
+Application event log**, source **JumpAgent**, event ID **1001**. No event-source
+installation, registry/policy changes, or Jump Diagnostics/Audit fields are added.
+The helper has no inherited console, so these records remain accessible during
+installed LocalSystem testing. Repeated identical stage results are suppressed.
+Records contain only a fixed stage, a success/status flag, an allowlisted desktop name,
+a numeric Win32 code, and an existing safe capture failure code. A zero Win32
+code does not prove why SendInput failed; Windows does not report all such causes.
+
+Stages distinguish `desktop_open`, `desktop_name`, `desktop_old_input` (old-handle
+query success/failure), `desktop_old_active` (still receiving input), `desktop_attach`, `desktop_changed`, `send_input`,
+`capture_first_attempt`, `capture_first_result`, and `frame_first_sent`. A fresh
+logged-in console should show Default open/name, successful attachment, a first
+capture attempt/result, and a first frame sent. Capture remains the PR #40 GDI
+implementation. No screenshots, clipboard text, keystrokes, coordinates, handles,
+paths, arbitrary object/window names, credentials, or raw error strings are logged.
+
+For the most recent local records, run elevated PowerShell on the tested device:
+
+```powershell
+Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1001; StartTime=(Get-Date).AddMinutes(-10)} |
+    Where-Object ProviderName -eq 'JumpAgent' |
+    ForEach-Object { [pscustomobject]@{Time=$_.TimeCreated; Detail=$_.Properties[0].Value} }
+```
+
+The source may lack a registered message description; the event's data still
+contains the safe runtime record. Validate a new installed Windows agent by
+starting at sign-in/lock, moving/clicking/typing, signing into Default on the same
+Screen route, then disconnecting and starting another session while already
+logged in. Confirm the first Default frame paints. Also retain the existing
+lock/UAC/logoff, helper replacement, SAS/clipboard and presence/Files/RDP checks.
