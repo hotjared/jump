@@ -115,51 +115,127 @@ func (p *desktopPipe) receive(v any) error {
 }
 
 type helperFrame struct {
-	Data     []byte `json:"data,omitempty"`
-	Width    int    `json:"width,omitempty"`
-	Height   int    `json:"height,omitempty"`
-	Code     string `json:"code,omitempty"`
-	Released bool   `json:"released,omitempty"`
+	Data      []byte   `json:"data,omitempty"`
+	Width     int      `json:"width,omitempty"`
+	Height    int      `json:"height,omitempty"`
+	Code      string   `json:"code,omitempty"`
+	Released  bool     `json:"released,omitempty"`
+	Operation *message `json:"operation,omitempty"`
 }
 type windowsDesktop struct {
-	pipe    *desktopPipe
-	job     windows.Handle
-	session uint32
-	once    sync.Once
+	frames        chan desktopFrame
+	errors        chan error
+	readerDone    chan struct{}
+	cancel        context.CancelFunc
+	pipe          *desktopPipe
+	job           windows.Handle
+	session       uint32
+	once          sync.Once
+	events        chan message
+	results       chan message
+	operationMu   sync.Mutex
+	resultMu      sync.Mutex
+	resultID      string
+	resultContext context.Context
 }
 
-func (d *windowsDesktop) Next(context.Context) (desktopFrame, error) {
+func (d *windowsDesktop) Next(ctx context.Context) (desktopFrame, error) {
+	select {
+	case frame := <-d.frames:
+		return frame, nil
+	case err := <-d.errors:
+		return desktopFrame{}, err
+	case <-ctx.Done():
+		return desktopFrame{}, ctx.Err()
+	case <-d.pipe.ctx.Done():
+		return desktopFrame{}, d.pipe.ctx.Err()
+	}
+}
+func (d *windowsDesktop) readIPC() {
+	defer close(d.readerDone)
+	if err := d.pumpIPC(); err != nil {
+		select {
+		case d.errors <- err:
+		case <-d.pipe.ctx.Done():
+		}
+	}
+}
+func (d *windowsDesktop) pumpIPC() error {
 	for {
 		var f helperFrame
 		if e := d.pipe.receive(&f); e != nil {
-			return desktopFrame{}, e
+			return e
+		}
+		if f.Operation != nil {
+			if f.Operation.Type == "screen_event" {
+				select {
+				case d.events <- *f.Operation:
+				default:
+				}
+			} else {
+				d.resultMu.Lock()
+				id, ctx := d.resultID, d.resultContext
+				d.resultMu.Unlock()
+				if ctx != nil && id == f.Operation.RequestID {
+					select {
+					case d.results <- *f.Operation:
+					case <-ctx.Done():
+					case <-d.pipe.ctx.Done():
+						return d.pipe.ctx.Err()
+					}
+				}
+			}
+			continue
 		}
 		if f.Released {
 			continue
 		}
 		if f.Code != "" {
-			return desktopFrame{}, errors.New(f.Code)
+			return errors.New(f.Code)
 		}
 		if windows.WTSGetActiveConsoleSessionId() != d.session {
-			return desktopFrame{}, errors.New("interactive_session_changed")
+			return errors.New("interactive_session_changed")
 		}
-		return desktopFrame{f.Data, f.Width, f.Height}, nil
+		frame := desktopFrame{f.Data, f.Width, f.Height}
+		// Reading IPC must not stall clipboard replies behind frame credit. Retain
+		// only the latest unconsumed capture; mux still assigns IDs and requires ACK.
+		select {
+		case d.frames <- frame:
+		default:
+			select {
+			case <-d.frames:
+			default:
+			}
+			select {
+			case d.frames <- frame:
+			case <-d.pipe.ctx.Done():
+				return d.pipe.ctx.Err()
+			}
+		}
 	}
 }
 func (d *windowsDesktop) Input(in screenInput) error {
 	if !validScreenInput(&in) || windows.WTSGetActiveConsoleSessionId() != d.session {
 		return errors.New("input_failed")
 	}
-	return d.pipe.send(in)
+	return d.pipe.send(message{Type: "screen_input", Input: &in})
 }
 func (d *windowsDesktop) Close() {
 	d.once.Do(func() {
+		if d.cancel != nil {
+			d.cancel()
+		}
+		if d.readerDone != nil {
+			<-d.readerDone
+		}
+		d.pipe.writeMu.Lock()
+		defer d.pipe.writeMu.Unlock()
 		// Capture reader has stopped before Close. Give the helper a bounded chance
 		// to release its own injected keys/buttons before enforcing job termination.
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
 		pipe := &desktopPipe{ctx: ctx, handle: d.pipe.handle}
-		if pipe.send(screenInput{Action: "release"}) == nil {
+		if pipe.send(message{Type: "screen_input", Input: &screenInput{Action: "release"}}) == nil {
 			for {
 				var f helperFrame
 				if pipe.receive(&f) != nil || f.Released {
@@ -171,17 +247,25 @@ func (d *windowsDesktop) Close() {
 		windows.CloseHandle(d.pipe.handle)
 	})
 }
-func launchDesktop(ctx context.Context) (desktopBridge, error) {
+func launchConsoleHelper(ctx context.Context, events chan message) (*windowsDesktop, error) {
 	if !screenSupported() {
 		return nil, errors.New("helper_start_failed")
 	}
 	session, found := discoverDesktopSession(windows.WTSGetActiveConsoleSessionId, func(id uint32) bool {
-		var user windows.Token
-		if windows.WTSQueryUserToken(id, &user) != nil {
+		// Query session existence/state, never a logged-on user's token. WTSInit is
+		// valid during sign-in; a disconnected/nonexistent session is not console.
+		var info *byte
+		var size uint32
+		r, _, _ := windows.NewLazySystemDLL("wtsapi32.dll").NewProc("WTSQuerySessionInformationW").Call(0, uintptr(id), 8, uintptr(unsafe.Pointer(&info)), uintptr(unsafe.Pointer(&size)))
+		if r == 0 || info == nil {
 			return false
 		}
-		user.Close()
-		return true
+		defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(info)))
+		if size < 4 {
+			return false
+		}
+		state := *(*uint32)(unsafe.Pointer(info))
+		return state == 0 || state == 1 || state == 9 // Active, Connected, Init
 	})
 	if !found {
 		return nil, errors.New("no_interactive_session")
@@ -205,7 +289,8 @@ func launchDesktop(ctx context.Context) (desktopBridge, error) {
 		windows.CloseHandle(pipe)
 		return nil, errors.New("helper_start_failed")
 	}
-	d := &windowsDesktop{pipe: &desktopPipe{ctx: ctx, handle: pipe}, job: job, session: session}
+	pipeCtx, pipeCancel := context.WithCancel(ctx)
+	d := &windowsDesktop{cancel: pipeCancel, pipe: &desktopPipe{ctx: pipeCtx, handle: pipe}, job: job, session: session, events: events, results: make(chan message, 1)}
 	ok := false
 	defer func() {
 		if !ok {
@@ -275,19 +360,26 @@ func launchDesktop(ctx context.Context) (desktopBridge, error) {
 	if windows.GetNamedPipeClientProcessId(pipe, &pid) != nil || pid != pi.ProcessId {
 		return nil, errors.New("helper_start_failed")
 	}
+	d.frames = make(chan desktopFrame, 1)
+	d.errors = make(chan error, 1)
+	d.readerDone = make(chan struct{})
+	go d.readIPC()
 	ok = true
 	return d, nil
 }
-func ordinaryDesktop() bool {
-	h, _, _ := screenUser32.NewProc("OpenInputDesktop").Call(0, 0, 1)
+func openScreenDesktop() (uintptr, string) {
+	h, _, _ := screenUser32.NewProc("OpenInputDesktop").Call(0, 0, 0x81) // READOBJECTS | WRITEOBJECTS
 	if h == 0 {
-		return false
+		return 0, ""
 	}
-	defer screenUser32.NewProc("CloseDesktop").Call(h)
 	var name [256]uint16
 	var size uint32
 	r, _, _ := screenUser32.NewProc("GetUserObjectInformationW").Call(h, 2, uintptr(unsafe.Pointer(&name[0])), 512, uintptr(unsafe.Pointer(&size)))
-	return r != 0 && strings.EqualFold(windows.UTF16ToString(name[:]), "Default")
+	if r == 0 {
+		screenUser32.NewProc("CloseDesktop").Call(h)
+		return 0, ""
+	}
+	return h, windows.UTF16ToString(name[:])
 }
 func desktopHelper(args []string) error {
 	if len(args) != 3 || !screenSupported() || !strings.HasPrefix(args[0], `\\.\pipe\jump-desktop-`) || len(args[0]) != len(`\\.\pipe\jump-desktop-`)+32 {
@@ -321,12 +413,12 @@ func desktopHelper(args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	pipe := &desktopPipe{ctx: ctx, handle: h}
-	input := make(chan screenInput, 64)
+	input := make(chan message, 64)
 	go func() {
 		defer cancel()
 		for {
-			var in screenInput
-			if pipe.receive(&in) != nil || !validScreenInput(&in) {
+			var in message
+			if pipe.receive(&in) != nil {
 				return
 			}
 			select {
@@ -340,24 +432,125 @@ func desktopHelper(args []string) error {
 	defer runtime.UnlockOSThread()
 	keys := make(map[int]bool)
 	buttons := make(map[int]bool)
+	releasedKeys, releasedButtons := make(map[int]bool), make(map[int]bool)
 	release := func() {
-		if !ordinaryDesktop() {
-			clear(keys)
-			clear(buttons)
-			return
+		for _, in := range releaseHeldScreenInput(keys, buttons) {
+			if in.Action == "key" {
+				releasedKeys[in.Key] = true
+			} else {
+				releasedButtons[in.Button] = true
+			}
+			injectScreenInput(in)
 		}
+	}
+
+	defer release()
+	original, _, _ := screenUser32.NewProc("GetThreadDesktop").Call(uintptr(windows.GetCurrentThreadId()))
+	var follower desktopFollower
+	closeDesktop := func(h uintptr) { screenUser32.NewProc("CloseDesktop").Call(h) }
+	attach := func(h uintptr) bool { r, _, _ := screenUser32.NewProc("SetThreadDesktop").Call(h); return r != 0 }
+	defer func() {
+		release()
+		if follower.handle != 0 && attach(original) {
+			closeDesktop(follower.handle)
+		}
+	}()
+	var gap time.Time
+	follow := func() (bool, bool, error) {
+		h, name := openScreenDesktop()
+		if h == 0 {
+			release()
+			if gap.IsZero() {
+				gap = time.Now()
+			}
+			if time.Since(gap) > 5*time.Second {
+				return false, false, errors.New("desktop_open_failed")
+			}
+			return false, false, nil
+		}
+		initial := follower.handle == 0
+		// Keep held-key state until after attaching, then send releases on the new
+		// physical input desktop too. Windows may reject releases on the old one.
+		oldKeys, oldButtons := make(map[int]bool), make(map[int]bool)
 		for k := range keys {
-			injectScreenInput(screenInput{Action: "key", Key: k})
+			oldKeys[k] = true
 		}
 		for b := range buttons {
-			injectScreenInput(screenInput{Action: "button", Button: b})
+			oldButtons[b] = true
 		}
-		clear(keys)
-		clear(buttons)
+		if follower.handle != 0 {
+			var active int32
+			var size uint32
+			r, _, _ := screenUser32.NewProc("GetUserObjectInformationW").Call(follower.handle, 6, uintptr(unsafe.Pointer(&active)), 4, uintptr(unsafe.Pointer(&size)))
+			if r != 0 && active == 0 {
+				follower.name = ""
+			}
+		}
+		changed, err := follower.follow(h, name, release, attach, closeDesktop)
+		if err != nil {
+			if gap.IsZero() {
+				gap = time.Now()
+			}
+			if time.Since(gap) > 5*time.Second {
+				return false, false, err
+			}
+			return false, false, nil
+		}
+		gap = time.Time{}
+		for k := range releasedKeys {
+			oldKeys[k] = true
+		}
+		for b := range releasedButtons {
+			oldButtons[b] = true
+		}
+		if changed || len(releasedKeys) > 0 || len(releasedButtons) > 0 {
+			for k := range oldKeys {
+				injectScreenInput(screenInput{Action: "key", Key: k})
+			}
+			for b := range oldButtons {
+				injectScreenInput(screenInput{Action: "button", Button: b})
+			}
+			clear(releasedKeys)
+			clear(releasedButtons)
+		}
+		if changed {
+			stage := "desktop_changed"
+			if initial {
+				stage = "desktop_attached"
+			}
+			_ = pipe.send(helperFrame{Operation: &message{Type: "screen_event", Stage: stage, Desktop: safeDesktopName(name)}})
+		}
+		return true, changed, nil
 	}
-	defer release()
+	var clipboardOp screenOperation
+	clipboardJobs := make(chan message, 1)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case job := <-clipboardJobs:
+				text, err := windowsClipboard(job.Kind, job.Data)
+				code := "ok"
+				if err != nil {
+					code = err.Error()
+				}
+				if code == "ok" && job.Kind == "clipboard_get" {
+					for _, chunk := range clipboardChunks(job.RequestID, []byte(text)) {
+						if pipe.send(helperFrame{Operation: &chunk}) != nil {
+							return
+						}
+					}
+				}
+				if pipe.send(helperFrame{Operation: &message{Type: "screen_operation_result", RequestID: job.RequestID, Kind: job.Kind, Code: code}}) != nil {
+					return
+				}
+			}
+		}
+	}()
 	ticker := time.NewTicker(time.Second / 6)
 	defer ticker.Stop()
+	var captureGap time.Time
 	var last [32]byte
 	first := true
 	fail := func(code string) error { _ = pipe.send(helperFrame{Code: code}); return errors.New(code) }
@@ -365,13 +558,52 @@ func desktopHelper(args []string) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case in := <-input:
+		case command := <-input:
 			if windows.WTSGetActiveConsoleSessionId() != uint32(session) {
 				return fail("interactive_session_changed")
 			}
-			if !ordinaryDesktop() {
-				return fail("secure_desktop")
+			if command.Type != "screen_input" {
+				if clipboardOp.request(command) != nil {
+					return fail("invalid_frame")
+				}
+				if command.Type == "screen_operation_cancel" {
+					continue
+				}
+				ready := command.Type == "screen_operation" && command.Kind == "clipboard_get"
+				if command.Type == "screen_clipboard" {
+					if clipboardOp.response(message{Type: "screen_clipboard_ack", RequestID: command.RequestID, Index: command.Index}) != nil {
+						return fail("invalid_frame")
+					}
+					ready = clipboardOp.index == clipboardOp.count
+				}
+				if ready {
+					job := message{RequestID: clipboardOp.id, Kind: clipboardOp.kind, Data: string(clipboardOp.data)}
+					select {
+					case clipboardJobs <- job:
+					default:
+						_ = pipe.send(helperFrame{Operation: &message{Type: "screen_operation_result", RequestID: job.RequestID, Kind: job.Kind, Code: "operation_busy"}})
+					}
+					clipboardOp.clear()
+				}
+				continue
 			}
+			if !validScreenInput(command.Input) {
+				return fail("invalid_frame")
+			}
+			in := *command.Input
+			ready, changed, err := follow()
+			if err != nil {
+				return fail(screenFailure(err))
+			}
+			if changed {
+				first = true
+			}
+			if !ready {
+				continue
+			}
+			if changed && in.Action != "release" {
+				continue
+			} // Never replay an old-desktop key-down.
 			if in.Action == "release" {
 				release()
 				if pipe.send(helperFrame{Released: true}) != nil {
@@ -380,6 +612,14 @@ func desktopHelper(args []string) error {
 				continue
 			}
 			if !injectScreenInput(in) {
+				ready, changed, err := follow()
+				if err != nil {
+					return fail(screenFailure(err))
+				}
+				if !ready || changed {
+					first = true
+					continue
+				}
 				return fail("input_failed")
 			}
 			if in.Action == "key" {
@@ -400,13 +640,35 @@ func desktopHelper(args []string) error {
 			if windows.WTSGetActiveConsoleSessionId() != uint32(session) {
 				return fail("interactive_session_changed")
 			}
-			if !ordinaryDesktop() {
-				return fail("secure_desktop")
+			ready, changed, err := follow()
+			if err != nil {
+				return fail(screenFailure(err))
+			}
+			if changed {
+				first = true
+			}
+			if !ready {
+				continue
 			}
 			f, e := capturePrimary()
 			if e != nil {
-				return fail(screenFailure(e))
+				ready, changed, err := follow()
+				if err != nil {
+					return fail(screenFailure(err))
+				}
+				if !ready || changed {
+					first = true
+					continue
+				}
+				if captureGap.IsZero() {
+					captureGap = time.Now()
+				}
+				if time.Since(captureGap) > 5*time.Second {
+					return fail(screenFailure(e))
+				}
+				continue
 			}
+			captureGap = time.Time{}
 			digest := sha256.Sum256(f.JPEG)
 			if !first && digest == last {
 				continue

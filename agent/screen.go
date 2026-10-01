@@ -19,7 +19,13 @@ type desktopBridge interface {
 	Close()
 }
 
+type desktopOperations interface {
+	Operation(context.Context, string, string) (string, error)
+	Events() <-chan message
+}
+
 type screenStream struct {
+	v2       bool
 	ctx      context.Context
 	cancel   context.CancelFunc
 	input    chan message
@@ -67,7 +73,7 @@ func (m *screenMux) handle(msg message) bool {
 			return true
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		s = &screenStream{ctx: ctx, cancel: cancel, input: make(chan message, 64), ack: make(chan uint64, 1), closed: make(chan struct{}), finished: make(chan struct{})}
+		s = &screenStream{v2: msg.ScreenVersion == 2, ctx: ctx, cancel: cancel, input: make(chan message, 64), ack: make(chan uint64, 1), closed: make(chan struct{}), finished: make(chan struct{})}
 		m.mu.Lock()
 		if m.stream != nil {
 			m.mu.Unlock()
@@ -82,6 +88,9 @@ func (m *screenMux) handle(msg message) bool {
 	if s == nil || id != msg.SessionID {
 		return true
 	}
+	if !s.v2 && screenV2Message(msg.Type) {
+		return true // A legacy server never negotiates or receives v2 traffic.
+	}
 	switch msg.Type {
 	case "screen_close":
 		m.close(s)
@@ -91,7 +100,7 @@ func (m *screenMux) handle(msg message) bool {
 		default:
 			m.close(s)
 		}
-	case "screen_mode", "screen_input":
+	case "screen_mode", "screen_input", "screen_operation", "screen_clipboard", "screen_clipboard_ack", "screen_operation_cancel":
 		if msg.Type == "screen_mode" && msg.Mode != "control" && msg.Mode != "view" || msg.Type == "screen_input" && !validScreenInput(msg.Input) {
 			m.close(s)
 			return true
@@ -152,6 +161,60 @@ func (m *screenMux) run(s *screenStream, id string) {
 			}
 		}
 	}()
+	operations, hasOperations := bridge.(desktopOperations)
+	var events <-chan message
+	if hasOperations {
+		events = operations.Events()
+	}
+	var op screenOperation
+	type opResult struct{ id, text, code string }
+	results := make(chan opResult, 1)
+	var opCancel context.CancelFunc
+	defer func() {
+		if opCancel != nil {
+			opCancel()
+		}
+	}()
+	var outgoing []message
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	sendOperation := func(v message) bool {
+		v.Version, v.SessionID = 1, id
+		return m.send(v) == nil
+	}
+	finishOperation := func(code string) bool {
+		result := message{Type: "screen_operation_result", RequestID: op.id, Kind: op.kind, Code: code}
+		if opCancel != nil {
+			opCancel()
+			opCancel = nil
+		}
+		outgoing = nil
+		op.clear()
+		return sendOperation(result)
+	}
+	startOperation := func(text string) {
+		operationID, kind := op.id, op.kind
+		if !hasOperations {
+			_ = finishOperation("clipboard_unavailable")
+			return
+		}
+		ctx, cancel := context.WithTimeout(s.ctx, 20*time.Second)
+		opCancel = cancel
+		go func() {
+			value, err := operations.Operation(ctx, kind, text)
+			code := "ok"
+			if err != nil {
+				code = err.Error()
+				if !safeOperationCode(code) {
+					code = "clipboard_unavailable"
+				}
+			}
+			select {
+			case results <- opResult{operationID, value, code}:
+			case <-ctx.Done():
+			}
+		}()
+	}
 	mode := "control"
 	var frameID uint64
 	var waiting uint64
@@ -166,6 +229,45 @@ func (m *screenMux) run(s *screenStream, id string) {
 		select {
 		case <-s.ctx.Done():
 			return
+		case event := <-events:
+			if s.v2 && safeScreenEvent(event) && !sendOperation(event) {
+				return
+			}
+		case <-tick.C:
+			if op.id != "" && time.Since(op.started) > 30*time.Second {
+				if !finishOperation("operation_timeout") {
+					return
+				}
+			}
+		case result := <-results:
+			if result.id != op.id {
+				continue
+			}
+			if result.code != "ok" {
+				if !finishOperation(result.code) {
+					return
+				}
+				continue
+			}
+			if op.kind != "clipboard_get" {
+				if !finishOperation("ok") {
+					return
+				}
+				continue
+			}
+			data := []byte(result.text)
+			if !clipboardText(data) {
+				if !finishOperation("clipboard_too_large") {
+					return
+				}
+				continue
+			}
+			outgoing = clipboardChunks(op.id, data)
+			chunk := outgoing[0]
+			outgoing = outgoing[1:]
+			if op.response(chunk) != nil || !sendOperation(chunk) {
+				return
+			}
 		case err := <-errors:
 			fail(screenFailure(err))
 			return
@@ -183,7 +285,58 @@ func (m *screenMux) run(s *screenStream, id string) {
 			if s.ctx.Err() != nil {
 				return
 			}
-			if in.Type == "screen_mode" {
+			if in.Type == "screen_operation" || in.Type == "screen_clipboard" || in.Type == "screen_clipboard_ack" || in.Type == "screen_operation_cancel" {
+				if err := op.request(in); err != nil {
+					fail("invalid_frame")
+					return
+				}
+				if op.id == "" {
+					continue
+				} // Credited reply/cancel may race a completed operation.
+				if in.Type == "screen_operation_cancel" {
+					if !finishOperation("operation_cancelled") {
+						return
+					}
+					continue
+				}
+				if mode != "control" {
+					if !finishOperation("control_required") {
+						return
+					}
+					continue
+				}
+				switch in.Type {
+				case "screen_operation":
+					if in.Kind != "clipboard_set" {
+						startOperation("")
+					}
+				case "screen_clipboard":
+					ack := message{Type: "screen_clipboard_ack", RequestID: op.id, Index: in.Index}
+					if op.response(ack) != nil || !sendOperation(ack) {
+						return
+					}
+					if op.index == op.count {
+						startOperation(string(op.data))
+					}
+				case "screen_clipboard_ack":
+					if len(outgoing) == 0 {
+						if !finishOperation("ok") {
+							return
+						}
+					} else {
+						chunk := outgoing[0]
+						outgoing = outgoing[1:]
+						if op.response(chunk) != nil || !sendOperation(chunk) {
+							return
+						}
+					}
+				}
+			} else if in.Type == "screen_mode" {
+				if op.id != "" {
+					if !finishOperation("control_required") {
+						return
+					}
+				}
 				if err := bridge.Input(screenInput{Action: "release"}); err != nil {
 					fail("input_failed")
 					return
@@ -227,7 +380,7 @@ func screenFailure(err error) string {
 		return err.Error()
 	}
 	switch err.Error() {
-	case "no_interactive_session", "helper_start_failed", "capture_failed", "input_failed", "interactive_session_changed", "secure_desktop":
+	case "no_interactive_session", "helper_start_failed", "capture_failed", "input_failed", "interactive_session_changed", "desktop_open_failed", "desktop_switch_failed":
 		return err.Error()
 	}
 	return "capture_failed"
@@ -237,10 +390,26 @@ func screenFailure(err error) string {
 func screenPlatformSupported(goos, arch string, major uint32, system bool) bool {
 	return goos == "windows" && arch == "amd64" && major >= 10 && system
 }
-func discoverDesktopSession(discover func() uint32, loggedIn func(uint32) bool) (uint32, bool) {
+func discoverDesktopSession(discover func() uint32, usable func(uint32) bool) (uint32, bool) {
 	id := discover()
-	if id == 0 || id == 0xffffffff || !loggedIn(id) {
+	if id == 0 || id == 0xffffffff || !usable(id) {
 		return 0, false
 	}
 	return id, true
+}
+
+// Advertise the base protocol too, for servers predating v2 negotiation.
+func appendScreenCapabilities(caps []string, supported bool) []string {
+	if supported {
+		return append(caps, "screen_control_v1", "screen_control_v2")
+	}
+	return caps
+}
+
+func screenV2Message(kind string) bool {
+	switch kind {
+	case "screen_operation", "screen_clipboard", "screen_clipboard_ack", "screen_operation_cancel", "screen_operation_result", "screen_event":
+		return true
+	}
+	return false
 }

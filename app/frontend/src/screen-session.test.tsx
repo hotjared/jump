@@ -23,8 +23,8 @@ vi.stubGlobal('PointerEvent', MouseEvent)
 vi.mock('@xterm/xterm', () => ({ Terminal: class {} }))
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: class {} }))
 afterEach(() => vi.restoreAllMocks())
-function active() {
-  const session = new ScreenSession('sid', 'device', 'PC', 'windows')
+function active(capabilities = ['screen_control_v1', 'screen_control_v2']) {
+  const session = new ScreenSession('sid', 'device', 'PC', 'windows', capabilities)
   Socket.last.onmessage?.({ data: JSON.stringify({ type: 'status', state: 'active' }) })
   return session
 }
@@ -40,7 +40,9 @@ describe('screen control', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Screen Control' }))
     await waitFor(() => expect(connected).toHaveBeenCalledOnce())
     expect(mutate).toHaveBeenCalledWith('/api/devices/device/screen-sessions', 'POST', {})
-    expect(connected.mock.calls[0][0].protocol).toBe('Screen'); view.unmount()
+    expect(connected.mock.calls[0][0].protocol).toBe('Screen')
+    expect(connected.mock.calls[0][0].supportsAdminOperations).toBe(false)
+    expect(connected.mock.calls[0][0].capabilities).toEqual(['screen_control_v1']); view.unmount()
   })
   it('renders Screen workspace, Files, mode, fullscreen and disconnect', () => {
     const session = active(); vi.spyOn(session, 'attach').mockReturnValue(() => {})
@@ -92,4 +94,127 @@ describe('screen control', () => {
     expect(windowsKey('Quote')).toBe(222); expect(windowsKey('F12')).toBe(123)
     expect(windowsKey('Delete')).toBe(46); expect(windowsKey('unknown')).toBeUndefined()
   })
+})
+
+function opReceive(frame: object) { Socket.last.onmessage?.({ data: JSON.stringify(frame) }) }
+function opFrames() { return Socket.last.send.mock.calls.map(([raw]) => JSON.parse(raw)) }
+function opRequest() { return opFrames().find(frame => frame.type === 'screen_operation') }
+
+describe('explicit Screen actions', () => {
+  it('round trips Unicode and empty text only on explicit requests', async () => {
+    const session = active(); const text = 'héllo 世界 😀'
+    const readText = vi.fn().mockResolvedValue(text); const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText, writeText } })
+    expect(readText).not.toHaveBeenCalled(); expect(writeText).not.toHaveBeenCalled()
+    const paste = session.pasteLocalClipboardToRemote()
+    await waitFor(() => expect(opRequest()?.kind).toBe('clipboard_set'))
+    const id = opRequest().request_id
+    const chunk = opFrames().find(frame => frame.type === 'screen_clipboard')
+    expect(new TextDecoder().decode(Uint8Array.from(atob(chunk.data), ch => ch.charCodeAt(0)))).toBe(text)
+    opReceive({ type: 'screen_clipboard_ack', request_id: id, index: 0 })
+    opReceive({ type: 'screen_operation_result', request_id: id, kind: 'clipboard_set', code: 'ok' })
+    expect(await paste).toBe(true)
+    for (const data of [chunk.data, '']) {
+      Socket.last.send.mockClear(); const copy = session.copyRemoteClipboardToLocal(); const copyId = opRequest().request_id
+      opReceive({ type: 'screen_clipboard', request_id: copyId, index: 0, count: 1, data })
+      expect(opFrames().at(-1)).toEqual({ type: 'screen_clipboard_ack', request_id: copyId, index: 0 })
+      opReceive({ type: 'screen_operation_result', request_id: copyId, kind: 'clipboard_get', code: 'ok' })
+      expect(await copy).toBe(true); expect(writeText).toHaveBeenLastCalledWith(data ? text : '')
+    }
+    session.disconnect()
+  })
+  it('reports browser permission errors without exposing raw errors or ending Screen', async () => {
+    const session = active(); const readText = vi.fn().mockRejectedValue(new Error('sensitive details')); const writeText = vi.fn().mockRejectedValue(new Error('sensitive details'))
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText, writeText } })
+    expect(await session.pasteLocalClipboardToRemote()).toBe(false)
+    expect(session.clipboardError).toBe('Could not read your clipboard. Check browser clipboard permission.')
+    const copy = session.copyRemoteClipboardToLocal(); const id = opRequest().request_id
+    opReceive({ type: 'screen_clipboard', request_id: id, index: 0, count: 1, data: '' })
+    opReceive({ type: 'screen_operation_result', request_id: id, kind: 'clipboard_get', code: 'ok' })
+    expect(await copy).toBe(false); expect(session.clipboardError).toBe('Could not write to your clipboard. Check browser clipboard permission.')
+    expect(session.state).toBe('connected'); session.disconnect()
+  })
+  it('enforces 1 MiB UTF-8 and one small credited chunk at a time', async () => {
+    const session = active(); const readText = vi.fn().mockResolvedValue('x'.repeat(1048577))
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText } })
+    expect(await session.pasteLocalClipboardToRemote()).toBe(false); expect(opRequest()).toBeUndefined()
+    expect(session.clipboardError).toContain('1 MiB')
+    readText.mockResolvedValue('x'.repeat(1048576)); const paste = session.pasteLocalClipboardToRemote()
+    await waitFor(() => expect(opRequest()).toBeTruthy()); const id = opRequest().request_id
+    for (let index = 0; index < 64; index++) {
+      const chunks = opFrames().filter(frame => frame.type === 'screen_clipboard')
+      expect(chunks.length).toBe(index + 1); expect(JSON.stringify(chunks[index]).length).toBeLessThan(24576); expect(chunks[index].count).toBe(64)
+      opReceive({ type: 'screen_clipboard_ack', request_id: id, index })
+    }
+    opReceive({ type: 'screen_operation_result', request_id: id, kind: 'clipboard_set', code: 'ok' })
+    expect(await paste).toBe(true); session.disconnect()
+  })
+  it('rejects malformed/missing/duplicate remote chunks', async () => {
+    for (const frame of [{ index: 1, count: 2, data: 'eA==' }, { index: 0, count: 65, data: '' }]) {
+      const session = active(); const copy = session.copyRemoteClipboardToLocal(); const id = opRequest().request_id
+      opReceive({ type: 'screen_clipboard', request_id: id, ...frame })
+      expect(await copy).toBe(false); expect(session.state).toBe('error')
+    }
+  })
+  it('sends dedicated SAS, survives policy denial, and gates all actions in View Only or pending Control', async () => {
+    const session = active(); const sas = session.sendSAS(); const id = opRequest().request_id
+    expect(opRequest().kind).toBe('sas')
+    expect(opFrames().filter(frame => frame.type === 'screen_input').every(frame => frame.input.action === 'release')).toBe(true)
+    opReceive({ type: 'screen_operation_result', request_id: id, kind: 'sas', code: 'sas_blocked' })
+    await sas; expect(session.operationMessage).toBe('Windows policy blocked remote Ctrl+Alt+Del.'); expect(session.state).toBe('connected')
+    session.setMode('view'); opReceive({ type: 'screen_mode', mode: 'view' }); Socket.last.send.mockClear()
+    await session.sendSAS(); expect(await session.copyRemoteClipboardToLocal()).toBe(false); expect(Socket.last.send).not.toHaveBeenCalled()
+    session.setMode('control'); Socket.last.send.mockClear()
+    await session.sendSAS(); expect(await session.pasteLocalClipboardToRemote()).toBe(false); expect(Socket.last.send).not.toHaveBeenCalled()
+    opReceive({ type: 'screen_mode', mode: 'control' }); expect(session.canControl).toBe(true); session.disconnect()
+  })
+  it('shows matching clipboard and SAS buttons disabled in View Only', () => {
+    const session = active(); vi.spyOn(session, 'attach').mockReturnValue(() => {})
+    const view = render(<SessionWorkspace sessions={[session]} activeId={session.id} select={() => {}} close={() => {}} />)
+    for (const label of ['Paste to Remote', 'Copy from Remote', 'Ctrl+Alt+Del']) expect((screen.getByRole('button', { name: label }) as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Control · switch to View Only' }))
+    for (const label of ['Paste to Remote', 'Copy from Remote', 'Ctrl+Alt+Del']) expect((screen.getByRole('button', { name: label }) as HTMLButtonElement).disabled).toBe(true)
+    view.unmount(); session.disconnect()
+  })
+})
+
+it('revokes input immediately when a mode change cancels clipboard, draining queued replies', async () => {
+  const session = active(); const copy = session.copyRemoteClipboardToLocal(); const id = opRequest().request_id
+  session.setMode('view')
+  expect(opFrames().some(frame => frame.type === 'screen_operation_cancel')).toBe(true)
+  expect(session.canControl).toBe(false)
+  opReceive({ type: 'screen_clipboard', request_id: id, index: 0, count: 1, data: 'eA==' })
+  expect(opFrames().some(frame => frame.type === 'screen_clipboard_ack')).toBe(false)
+  opReceive({ type: 'screen_operation_result', request_id: id, kind: 'clipboard_get', code: 'operation_cancelled' })
+  expect(await copy).toBe(false)
+  opReceive({ type: 'screen_mode', mode: 'view' })
+  expect(session.state).toBe('connected'); expect(session.mode).toBe('view'); session.disconnect()
+})
+
+
+it('keeps v1 basic controls while hiding and suppressing v2 operations', async () => {
+  const session = active(['screen_control_v1']); vi.spyOn(session, 'attach').mockReturnValue(() => {})
+  const readText = vi.fn(); const writeText = vi.fn()
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText, writeText } })
+  const view = render(<SessionWorkspace sessions={[session]} activeId={session.id} select={() => {}} close={() => {}} fileDevices={['device']} />)
+  for (const label of ['Paste to Remote', 'Copy from Remote', 'Ctrl+Alt+Del']) expect(screen.queryByRole('button', { name: label })).toBeNull()
+  for (const label of ['Files', 'Control · switch to View Only', 'Fullscreen', 'Disconnect']) expect(screen.getByRole('button', { name: label })).toBeTruthy()
+  expect(screen.getByText('Update the Windows Jump agent to enable unattended admin controls.')).toBeTruthy()
+  expect(session.canControl).toBe(true); expect(session.hasRemoteClipboard).toBe(false)
+  await session.sendSAS()
+  expect(await session.pasteLocalClipboardToRemote()).toBe(false)
+  expect(await session.copyRemoteClipboardToLocal()).toBe(false)
+  expect(readText).not.toHaveBeenCalled(); expect(writeText).not.toHaveBeenCalled()
+  expect(Socket.last.send).not.toHaveBeenCalled()
+  session.input({ action: 'key', key: 65, down: true }, true)
+  expect(opFrames().at(-1)?.type).toBe('screen_input')
+  view.unmount(); session.disconnect()
+})
+
+it('defaults unknown Screen capabilities to basic v1 controls', async () => {
+  const session = new ScreenSession('sid', 'device', 'PC', 'windows')
+  opReceive({ type: 'status', state: 'active' })
+  expect(session.supportsAdminOperations).toBe(false)
+  await session.sendSAS(); expect(opRequest()).toBeUndefined()
+  session.disconnect()
 })

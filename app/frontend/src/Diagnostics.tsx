@@ -26,7 +26,7 @@ const fileStageLabels: Record<string, string> = {
 }
 const stageLabels: Record<string, string> = {
   session_created: 'Session created', browser_attached: 'Browser attached', broker_connected: 'Broker route opened',
-  agent_session_opened: 'Screen helper opened', interactive_session_found: 'Interactive console session found', capture_started: 'Capture started', agent_stream_opened: 'Agent SSH stream opened', agent_tunnel_opened: 'Agent TCP tunnel opened',
+  agent_session_opened: 'Screen helper opened', interactive_session_found: 'Interactive console session found', capture_started: 'Capture started', desktop_attached: 'Console desktop attached', desktop_changed: 'Console desktop changed', sas_requested: 'Ctrl+Alt+Del requested', sas_sent: 'Ctrl+Alt+Del submitted', agent_stream_opened: 'Agent SSH stream opened', agent_tunnel_opened: 'Agent TCP tunnel opened',
   host_key_verified: 'Host key verified', guacd_connected: 'guacd connected',
   guacd_handshake_started: 'RDP handshake started', protocol_ready: 'Protocol ready',
   session_active: 'Session active', session_closed: 'Session closed', session_failed: 'Session failed',

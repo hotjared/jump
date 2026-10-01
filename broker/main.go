@@ -31,6 +31,10 @@ var pingInterval = 25 * time.Second
 var heartbeatTimeout = 65 * time.Second
 
 type message struct {
+	ScreenVersion int             `json:"screen_version,omitempty"`
+	RequestID     string          `json:"request_id,omitempty"`
+	Stage         string          `json:"stage,omitempty"`
+	Desktop       string          `json:"desktop,omitempty"`
 	FrameID       uint64          `json:"frame_id,omitempty"`
 	Index         int             `json:"index,omitempty"`
 	Count         int             `json:"count,omitempty"`
@@ -76,6 +80,8 @@ type message struct {
 type sessionRoute struct {
 	screenMu          sync.Mutex
 	screenSeq         screenSequence
+	screenOp          screenOperation
+	screenActions     chan message
 	screenMode        string
 	screenPendingMode string
 	deviceID          string
@@ -88,6 +94,8 @@ type sessionRoute struct {
 	firstClose        atomic.Pointer[string]
 	toAgentBytes      atomic.Uint64
 	toJumpBytes       atomic.Uint64
+
+	screenV2 bool // Negotiated against this route's authenticated agent connection.
 }
 
 func (r *sessionRoute) markClose(reason string) {
@@ -119,6 +127,8 @@ type broker struct {
 	fileCapabilities   map[string]bool
 	limits             map[string]window
 	wg                 sync.WaitGroup
+
+	screenV2Capabilities map[string]bool
 }
 
 func (b *broker) write(conn *websocket.Conn, value message) error {
@@ -855,10 +865,13 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 	if json.Unmarshal(auth.Metadata, &authInfo) != nil {
 		return
 	}
-	updateCapable, rdpCapable, fileCapable, screenCapable := false, false, false, false
+	updateCapable, rdpCapable, fileCapable, screenCapable, screenV2Capable := false, false, false, false, false
 	for _, capability := range authInfo.Capabilities {
-		if capability == "screen_control_v1" {
+		if capability == "screen_control_v1" || capability == "screen_control_v2" {
 			screenCapable = true
+		}
+		if capability == "screen_control_v2" {
+			screenV2Capable = true
 		}
 		if capability == "agent_update_v1" {
 			updateCapable = true
@@ -899,6 +912,10 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 	if b.screenCapabilities == nil {
 		b.screenCapabilities = make(map[string]bool)
 	}
+	if b.screenV2Capabilities == nil {
+		b.screenV2Capabilities = make(map[string]bool)
+	}
+	b.screenV2Capabilities[id] = screenV2Capable
 	b.screenCapabilities[id] = screenCapable
 	b.connections[id] = connectionID
 	b.capabilities[id] = updateCapable
@@ -919,6 +936,7 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 			delete(b.capabilities, id)
 			delete(b.rdpCapabilities, id)
 			delete(b.screenCapabilities, id)
+			delete(b.screenV2Capabilities, id)
 			delete(b.fileCapabilities, id)
 			delete(b.updating, id)
 		}

@@ -26,6 +26,10 @@ STAGES = frozenset(
         "agent_session_opened",
         "interactive_session_found",
         "capture_started",
+        "desktop_attached",
+        "desktop_changed",
+        "sas_requested",
+        "sas_sent",
         "session_closed",
         "session_failed",
     }
