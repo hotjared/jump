@@ -131,7 +131,7 @@ type windowsDesktop struct {
 	job           windows.Handle
 	session       uint32
 	once          sync.Once
-	events        chan message
+	events        chan<- message
 	results       chan message
 	operationMu   sync.Mutex
 	resultMu      sync.Mutex
@@ -247,7 +247,7 @@ func (d *windowsDesktop) Close() {
 		windows.CloseHandle(d.pipe.handle)
 	})
 }
-func launchConsoleHelper(ctx context.Context) (*windowsDesktop, error) {
+func launchConsoleHelper(ctx context.Context, events chan<- message) (*windowsDesktop, error) {
 	if !screenSupported() {
 		return nil, errors.New("helper_start_failed")
 	}
@@ -290,7 +290,7 @@ func launchConsoleHelper(ctx context.Context) (*windowsDesktop, error) {
 		return nil, errors.New("helper_start_failed")
 	}
 	pipeCtx, pipeCancel := context.WithCancel(ctx)
-	d := &windowsDesktop{cancel: pipeCancel, pipe: &desktopPipe{ctx: pipeCtx, handle: pipe}, job: job, session: session, events: make(chan message, 16), results: make(chan message, 1)}
+	d := &windowsDesktop{cancel: pipeCancel, pipe: &desktopPipe{ctx: pipeCtx, handle: pipe}, job: job, session: session, events: events, results: make(chan message, 1)}
 	ok := false
 	defer func() {
 		if !ok {

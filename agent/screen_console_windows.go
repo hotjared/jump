@@ -16,16 +16,19 @@ import (
 type consoleDesktop struct {
 	mu      sync.Mutex
 	current *windowsDesktop
-	events  chan message
+	events  <-chan message
 	closed  bool
+
+	launchHelper func(context.Context) (*windowsDesktop, error)
 }
 
 func launchDesktop(ctx context.Context) (desktopBridge, error) {
-	d, err := launchConsoleHelper(ctx)
+	launch, events := screenHelperFactory(launchConsoleHelper)
+	d, err := launch(ctx)
 	if err != nil {
 		return nil, err
 	}
-	c := &consoleDesktop{current: d, events: d.events}
+	c := &consoleDesktop{current: d, events: events, launchHelper: launch}
 	return c, nil
 }
 func (c *consoleDesktop) Events() <-chan message { return c.events }
@@ -59,9 +62,8 @@ func (c *consoleDesktop) Next(ctx context.Context) (desktopFrame, error) {
 			if ctx.Err() != nil {
 				return desktopFrame{}, ctx.Err()
 			}
-			replacement, e := launchConsoleHelper(ctx)
+			replacement, e := c.launchHelper(ctx)
 			if e == nil {
-				replacement.events = c.events
 				c.mu.Lock()
 				c.current = replacement
 				c.mu.Unlock()
