@@ -93,8 +93,9 @@ func (d *windowsDesktop) Operation(ctx context.Context, kind, text string) (stri
 	}
 }
 
-// SendSAS returns void. Preflight the service policy, then submit from the
-// LocalSystem service while impersonating SYSTEM in the bound console session.
+// SendSAS returns void. Preflight the service policy and bound physical console,
+// then call directly from the LocalSystem service. Impersonating a copy of the
+// service token with a rewritten session ID can silently prevent SAS delivery.
 // Success means submitted, not observed sign-in completion.
 func sendConsoleSAS(session uint32) error {
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, `Software\Microsoft\Windows\CurrentVersion\Policies\System`, registry.QUERY_VALUE)
@@ -110,40 +111,10 @@ func sendConsoleSAS(session uint32) error {
 	if proc.Find() != nil {
 		return errors.New("sas_unavailable")
 	}
-	var source, primary, impersonation windows.Token
-	if windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY, &source) != nil {
-		return errors.New("sas_unavailable")
-	}
-	defer source.Close()
-	if windows.DuplicateTokenEx(source, windows.TOKEN_ALL_ACCESS, nil, windows.SecurityImpersonation, windows.TokenPrimary, &primary) != nil {
-		return errors.New("sas_unavailable")
-	}
-	defer primary.Close()
-	if windows.SetTokenInformation(primary, windows.TokenSessionId, (*byte)(unsafe.Pointer(&session)), 4) != nil {
-		return errors.New("sas_unavailable")
-	}
-	if windows.DuplicateTokenEx(primary, windows.TOKEN_QUERY|windows.TOKEN_IMPERSONATE, nil, windows.SecurityImpersonation, windows.TokenImpersonation, &impersonation) != nil {
-		return errors.New("sas_unavailable")
-	}
-	defer impersonation.Close()
-	runtime.LockOSThread()
-	r, _, _ := windows.NewLazySystemDLL("advapi32.dll").NewProc("ImpersonateLoggedOnUser").Call(uintptr(impersonation))
-	if r == 0 {
-		runtime.UnlockOSThread()
-		return errors.New("sas_unavailable")
-	}
-	// Never reuse a thread if reverting impersonation fails.
 	if windows.WTSGetActiveConsoleSessionId() != session {
-		if windows.RevertToSelf() == nil {
-			runtime.UnlockOSThread()
-		}
 		return errors.New("sas_unavailable")
 	}
 	proc.Call(0)
-	if windows.RevertToSelf() != nil {
-		return errors.New("sas_unavailable")
-	}
-	runtime.UnlockOSThread()
 	return nil
 }
 

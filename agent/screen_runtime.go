@@ -22,7 +22,7 @@ func (t *screenRuntimeTrace) resetCapture() {
 
 func (t *screenRuntimeTrace) record(stage, desktop string, success bool, win32 uint32, code string) {
 	switch stage {
-	case "desktop_open", "desktop_name", "desktop_old_input", "desktop_old_active", "desktop_attach", "desktop_changed", "capture_first_attempt", "capture_first_result", "frame_first_sent", "send_input":
+	case "desktop_open", "desktop_name", "desktop_old_input", "desktop_old_active", "desktop_attach", "desktop_thread", "desktop_changed", "capture_first_attempt", "capture_first_result", "frame_first_sent", "send_input":
 	default:
 		return
 	}
