@@ -14,9 +14,6 @@ jobs:
           python-version: "3.12"
       - run: pip install -e '.[dev]'
         working-directory: app/backend
-      - name: Show formatting corrections
-        run: ruff check . --fix && ruff format . && git diff
-        working-directory: app/backend
       - run: pytest -q
         working-directory: app/backend
       - run: ruff check . && ruff format --check .

@@ -41,9 +41,10 @@ def recovery_client(tmp_path, monkeypatch):
     monkeypatch.setattr(screen, "release_screen_controller", lambda session: None)
     app.dependency_overrides[get_db] = independent_db
     try:
-        with Session(engine, expire_on_commit=False) as db, TestClient(
-            app, base_url=ORIGIN
-        ) as connection:
+        with (
+            Session(engine, expire_on_commit=False) as db,
+            TestClient(app, base_url=ORIGIN) as connection,
+        ):
             yield connection, db
     finally:
         app.dependency_overrides.clear()
