@@ -578,7 +578,8 @@ def list_file_transfers(
             FileTransfer.direction.in_(("upload", "download")),
             or_(
                 FileTransfer.state.in_(("pending", "active")),
-                func.coalesce(FileTransfer.completed_at, FileTransfer.last_activity_at) >= now() - timedelta(seconds=60),
+                func.coalesce(FileTransfer.completed_at, FileTransfer.last_activity_at)
+                >= now() - timedelta(seconds=60),
             ),
         )
         .order_by(FileTransfer.created_at.desc())
