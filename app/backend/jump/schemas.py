@@ -31,6 +31,7 @@ class Metadata(BaseModel):
     capabilities: list[str] = Field(default_factory=list, max_length=32)
     addresses: list[str] = Field(default_factory=list, max_length=16)
     current_user: str | None = Field(default=None, max_length=255)
+    interactive_user: str | None = Field(default=None, max_length=255)
 
     @field_validator("addresses")
     @classmethod

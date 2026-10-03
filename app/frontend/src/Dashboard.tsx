@@ -2,12 +2,14 @@ import { useEffect, useState } from 'react'
 import type { WorkspaceSession } from './SessionWorkspace'
 import { filename, labels, reason, type AuditEvent } from './audit-events'
 import './dashboard.css'
+import type { AgentUpdates } from './agent-updates'
+import { updateEligible } from './agent-updates'
 
 export type DashboardDevice = {
   id: string; hostname: string; display_name: string | null; online: boolean;
   identity_state: string;
-  agent_update: { update_available: boolean; current_version: string; latest_version: string | null;
-    update_state: { state: string; failure_reason: string | null; completed_at?: string | null } | null };
+  agent_update: { update_available: boolean; remote_update_supported?: boolean; current_version: string; latest_version: string | null;
+    update_state: { id?: string; state: string; failure_reason: string | null; completed_at?: string | null } | null };
 }
 export type DashboardEvent = AuditEvent
 const dashboardTypes = new Set([
@@ -19,8 +21,8 @@ const dashboardTypes = new Set([
 const recent = (date: string) => Date.now() - new Date(date).getTime() < 24 * 60 * 60 * 1000
 const time = (value: string) => new Date(value).toLocaleString()
 
-export default function Dashboard({ devices, sessions, events, open }: {
-  devices: DashboardDevice[]; sessions: WorkspaceSession[]; events: DashboardEvent[]; open: (id: string) => void;
+export default function Dashboard({ devices, sessions, events, open, updates, admin = false }: {
+  devices: DashboardDevice[]; sessions: WorkspaceSession[]; events: DashboardEvent[]; open: (id: string) => void; updates?: AgentUpdates; admin?: boolean;
 }) {
   const [, update] = useState(0)
   useEffect(() => {
@@ -30,14 +32,14 @@ export default function Dashboard({ devices, sessions, events, open }: {
   const names = new Map(devices.map(d => [d.id, d.display_name || d.hostname]))
   const meaningful = events.filter(e => dashboardTypes.has(e.event_type)).sort((a, b) =>
     new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).slice(0, 10)
-  const issues: { key: string; title: string; device: string; detail?: string; date?: string }[] = []
+  const issues: { key: string; title: string; device: string; detail?: string; date?: string; target?: DashboardDevice }[] = []
   for (const d of devices) {
     const name = d.display_name || d.hostname
     const state = d.agent_update?.update_state
     if (state?.state === 'failed') issues.push({ key: `update-failed-${d.id}`, title: 'Agent update failed',
-      device: name, detail: reason(state.failure_reason) || undefined, date: state.completed_at || undefined })
+      target: d, device: name, detail: reason(state.failure_reason) || undefined, date: state.completed_at || undefined })
     if (d.agent_update?.update_available && d.identity_state === 'active' && state?.state !== 'failed') issues.push({
-      key: `update-${d.id}`, title: 'Agent update available', device: name,
+      key: `update-${d.id}`, title: 'Agent update available', device: name, target: d,
       detail: `${d.agent_update.current_version || 'Unknown'} → ${d.agent_update.latest_version || 'Unknown'}`,
     })
     if (d.identity_state === 'revoked') issues.push({ key: `revoked-${d.id}`, title: 'Device revoked', device: name })
@@ -61,9 +63,15 @@ export default function Dashboard({ devices, sessions, events, open }: {
       <div><small>Agent Updates</small><strong>{devices.filter(d => d.agent_update?.update_available && d.identity_state === 'active').length}</strong></div>
       <div><small>Issues</small><strong>{issues.length}</strong></div>
     </div>
-    <section className="panel dashboard-panel" aria-label="Needs Attention"><h2>Needs Attention</h2>
+    <section className="panel dashboard-panel" aria-label="Needs Attention"><div className="dashboard-attention-heading"><h2>Needs Attention</h2>
+      {admin && updates && devices.some(d => d.agent_update.update_available && d.identity_state === 'active') && <button className="button" disabled={updates.batchRunning || !devices.some(d => updateEligible(d) && !updates.running(d))} onClick={() => void updates.startAll()}>Update all</button>}</div>
+      {updates?.status && <p role="status">{updates.status}</p>}
       {issues.length ? issues.map(item => <div className="dashboard-row" key={item.key}>
         <span className="dashboard-issue-mark" aria-hidden="true">!</span><div className="dashboard-row-main"><strong>{item.title}</strong><span>{item.device}</span>{item.detail && <small>{item.detail}</small>}</div>
+        {item.target && updates && <div className="dashboard-update-action">
+          {updates.attempts[item.target.id]?.error && <small role="alert">{updates.attempts[item.target.id].error}</small>}
+          {item.target.identity_state === 'active' && item.target.agent_update.update_available && (!item.target.online ? <small>Offline · update when reconnected</small> : item.target.agent_update.remote_update_supported !== true ? <small>Manual update required</small> : admin && <button className="button" aria-label={`Update ${item.device}`} disabled={updates.running(item.target)} onClick={() => void updates.start(item.target!)}>{updates.running(item.target) ? 'Updating…' : 'Update'}</button>)}
+        </div>}
         {item.date && <time dateTime={item.date}>{time(item.date)}</time>}
       </div>) : <div className="dashboard-empty">Nothing needs attention.</div>}
     </section>

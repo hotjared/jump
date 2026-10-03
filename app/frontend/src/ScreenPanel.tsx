@@ -31,7 +31,7 @@ export default function ScreenPanel({ device, admin, mutate, onConnected, existi
     }
     finally { setBusy(false) }
   }
-  return <section className="terminal-panel"><h3>Screen Control</h3>
+  return <section className="terminal-panel remote-section"><h3>Screen Control</h3>
     <p className="muted">View and control the desktop currently visible on the device. No Windows credentials or RDP required.</p>
     {!admin ? <p>Admin access required.</p> : !device.capabilities.some(capability => ['screen_control_v1', 'screen_control_v2'].includes(capability)) ? <p>Update the Windows Jump agent service to enable Screen Control.</p>
       : existing && ['connected', 'connecting'].includes(existing.state) ? <button className="button" onClick={openExisting}>Open Screen session</button>

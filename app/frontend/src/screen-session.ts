@@ -31,8 +31,15 @@ export class ScreenSession {
   readonly protocol = 'Screen' as const
   state: SessionState = 'connecting'
   error = ''
-  clipboardError = ''
-  operationMessage = ''
+  clipboardNoticeVersion = 0
+  private clipboardErrorText = ''
+  get clipboardError() { return this.clipboardErrorText }
+  set clipboardError(value: string) { this.clipboardErrorText = value; if (value) this.clipboardNoticeVersion++ }
+  operationNoticeVersion = 0
+  private operationMessageText = ''
+  get operationMessage() { return this.operationMessageText }
+  set operationMessage(value: string) { this.operationMessageText = value; if (value) this.operationNoticeVersion++ }
+  operationError = false
   operationBusy = false
   private pendingOperation: PendingOperation | null = null
   mode: 'control' | 'view' = 'control'
@@ -191,10 +198,10 @@ export class ScreenSession {
     }
   }
   async sendSAS() {
-    this.operationMessage = ''; this.notify()
+    this.operationMessage = ''; this.operationError = false; this.notify()
     if (!this.supportsAdminOperations || !this.canControl || this.operationBusy) return
     this.release()
-    try { await this.operation('sas'); this.operationMessage = 'Ctrl+Alt+Del request sent.' } catch (error) { this.operationMessage = (error as Error).message }
+    try { await this.operation('sas'); this.operationMessage = 'Ctrl+Alt+Del request sent.' } catch (error) { this.operationError = true; this.operationMessage = (error as Error).message }
     this.notify()
   }
   release() { if (this.state === 'connected' && this.mode === 'control') this.send({ type: 'screen_input', input: { action: 'release' } }) }

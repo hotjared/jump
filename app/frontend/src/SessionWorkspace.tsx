@@ -5,6 +5,7 @@ import '@xterm/xterm/css/xterm.css'
 import { SshSession } from './ssh-session'
 import { RdpSession } from './rdp-session'
 import { ScreenSession } from './screen-session'
+import RemoteNotice, { useRemoteNotice } from './RemoteNotice'
 
 export type WorkspaceSession = SshSession | RdpSession | ScreenSession
 
@@ -108,23 +109,43 @@ function SessionScreen({ session, visible }: { session: ScreenSession; visible: 
   return <div className="workspace-desktop" ref={node} aria-label={`${session.name} Screen desktop`} />
 }
 
-function RdpActions({ session }: { session: RdpSession | ScreenSession }) {
-  const [feedback, setFeedback] = useState('')
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current) }, [])
+function RdpActions({ session, notify }: { session: RdpSession | ScreenSession; notify: (text: string) => void }) {
   async function transfer(action: 'paste' | 'copy') {
     const success = action === 'paste'
       ? await session.pasteLocalClipboardToRemote()
       : await session.copyRemoteClipboardToLocal()
-    if (timer.current) clearTimeout(timer.current)
-    setFeedback(success ? (action === 'paste' ? 'Sent' : 'Copied') : '')
-    if (success) timer.current = setTimeout(() => setFeedback(''), 2000)
+    if (success) notify(action === 'paste' ? 'Sent to Remote' : 'Copied from Remote')
   }
   return <>
     <button type="button" className="button" disabled={session.state !== 'connected' || session.protocol === 'Screen' && (!session.canControl || session.operationBusy)} onClick={() => void transfer('paste')}>Paste to Remote</button>
     <button type="button" className="button" disabled={session.state !== 'connected' || !session.hasRemoteClipboard} onClick={() => void transfer('copy')}>Copy from Remote</button>
-    {feedback && <span className="clipboard-feedback" role="status">{feedback}</span>}
   </>
+}
+
+function SessionView({ session, visible, fileDevices, openFiles, close }: {
+  session: WorkspaceSession; visible: boolean; fileDevices: string[]; openFiles: (id: string) => void; close: () => void
+}) {
+  const { notice, notify, dismiss } = useRemoteNotice()
+  const clipboardError = session.protocol === 'SSH' ? '' : session.clipboardError
+  const operationMessage = session.protocol === 'Screen' ? session.operationMessage : ''
+  const clipboardNoticeVersion = session.protocol === 'SSH' ? 0 : session.clipboardNoticeVersion
+  const operationNoticeVersion = session.protocol === 'Screen' ? session.operationNoticeVersion : 0
+  const operationError = session.protocol === 'Screen' && session.operationError
+  useEffect(() => { if (clipboardError) notify(clipboardError, 'error') }, [clipboardError, clipboardNoticeVersion, notify])
+  useEffect(() => { if (operationMessage) notify(operationMessage, operationError ? 'error' : 'info') }, [operationMessage, operationError, operationNoticeVersion, notify])
+  return <div id={`session-${session.id}`} role="tabpanel" aria-label={`${session.name} ${session.protocol} session`}
+    className="session-view" hidden={!visible}>
+    <div className="session-heading"><div><strong>{session.name}</strong><span className="muted">{session.platform} · {session.protocol}</span>
+      <span className={`session-state state-${session.state}`}><i />{session.state}</span></div>
+      <div className="session-actions">{fileDevices.includes(session.deviceId) && <button className="button" onClick={() => openFiles(session.deviceId)}>Files</button>}{session.protocol === 'Screen' && <><button className="button" disabled={session.state !== 'connected'} onClick={() => session.setMode(session.mode === 'control' ? 'view' : 'control')}>{session.mode === 'control' ? 'Control · switch to View Only' : 'View Only · switch to Control'}</button>{session.supportsAdminOperations ? <><RdpActions session={session} notify={notify} /><button className="button" disabled={!session.canControl || session.operationBusy} onClick={() => void session.sendSAS()}>Ctrl+Alt+Del</button></> : <span className="muted">Update the Windows Jump agent to enable unattended admin controls.</span>}<button className="button" onClick={e => e.currentTarget.closest('.session-view')?.requestFullscreen()}>Fullscreen</button></>}{session.protocol === 'RDP' && <><RdpActions session={session} notify={notify} /><button className="button" onClick={e => e.currentTarget.closest('.session-view')?.requestFullscreen()}>Fullscreen</button></>}
+        <button className="button" onClick={close}>Disconnect</button></div></div>
+    {session.error && <p className="session-error" role="alert">{session.error}</p>}
+    <div className="remote-session-area">
+      <RemoteNotice notice={notice} dismiss={dismiss} />
+      {session.protocol === 'SSH' ? <SessionTerminal session={session} visible={visible} /> : session.protocol === 'Screen' ? <SessionScreen session={session} visible={visible} /> : <SessionDesktop session={session} visible={visible} />}
+    </div>
+    <div className="session-footer">Jump agent · {session.protocol === 'SSH' ? 'SSH localhost:22' : session.protocol === 'Screen' ? 'Windows console desktop · primary display' : 'RDP localhost:3389'}</div>
+  </div>
 }
 
 export default function SessionWorkspace({ sessions, activeId, select, close, fileDevices = [], openFiles = () => {} }: {
@@ -158,17 +179,7 @@ export default function SessionWorkspace({ sessions, activeId, select, close, fi
         <button type="button" className="session-tab-close" aria-label={`Close ${session.name} ${session.protocol} session`} onClick={() => closeTab(session.id)}>×</button>
       </div>)}
     </div>
-    {sessions.map(session => <div id={`session-${session.id}`} role="tabpanel" aria-label={`${session.name} ${session.protocol} session`}
-      className="session-view" key={session.id} hidden={activeId !== session.id}>
-      <div className="session-heading"><div><strong>{session.name}</strong><span className="muted">{session.platform} · {session.protocol}</span>
-        <span className={`session-state state-${session.state}`}><i />{session.state}</span></div>
-        <div className="session-actions">{fileDevices.includes(session.deviceId) && <button className="button" onClick={() => openFiles(session.deviceId)}>Files</button>}{session.protocol === 'Screen' && <><button className="button" disabled={session.state !== 'connected'} onClick={() => session.setMode(session.mode === 'control' ? 'view' : 'control')}>{session.mode === 'control' ? 'Control · switch to View Only' : 'View Only · switch to Control'}</button>{session.supportsAdminOperations ? <><RdpActions session={session} /><button className="button" disabled={!session.canControl || session.operationBusy} onClick={() => void session.sendSAS()}>Ctrl+Alt+Del</button></> : <span className="muted">Update the Windows Jump agent to enable unattended admin controls.</span>}<button className="button" onClick={e => e.currentTarget.closest('.session-view')?.requestFullscreen()}>Fullscreen</button></>}{session.protocol === 'RDP' && <><RdpActions session={session} /><button className="button" onClick={e => e.currentTarget.closest('.session-view')?.requestFullscreen()}>Fullscreen</button></>}
-          <button className="button" onClick={() => closeTab(session.id)}>Disconnect</button></div></div>
-      {session.error && <p className="session-error" role="alert">{session.error}</p>}
-      {(session.protocol === 'RDP' || session.protocol === 'Screen') && session.clipboardError && <p className="session-error" role="alert">{session.clipboardError}</p>}
-      {session.protocol === 'Screen' && session.operationMessage && <p role="status">{session.operationMessage}</p>}
-      {session.protocol === 'SSH' ? <SessionTerminal session={session} visible={activeId === session.id} /> : session.protocol === 'Screen' ? <SessionScreen session={session} visible={activeId === session.id} /> : <SessionDesktop session={session} visible={activeId === session.id} />}
-      <div className="session-footer">Jump agent · {session.protocol === 'SSH' ? 'SSH localhost:22' : session.protocol === 'Screen' ? 'Windows console desktop · primary display' : 'RDP localhost:3389'}</div>
-    </div>)}
+    {sessions.map(session => <SessionView key={session.id} session={session} visible={activeId === session.id}
+      fileDevices={fileDevices} openFiles={openFiles} close={() => closeTab(session.id)} />)}
   </section>
 }

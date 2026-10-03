@@ -35,14 +35,15 @@ import (
 var version = "dev"
 
 type metadata struct {
-	Hostname     string   `json:"hostname"`
-	OSFamily     string   `json:"os_family"`
-	OSVersion    string   `json:"os_version"`
-	Architecture string   `json:"architecture"`
-	AgentVersion string   `json:"agent_version"`
-	Capabilities []string `json:"capabilities"`
-	Addresses    []string `json:"addresses"`
-	CurrentUser  string   `json:"current_user,omitempty"`
+	Hostname        string   `json:"hostname"`
+	OSFamily        string   `json:"os_family"`
+	OSVersion       string   `json:"os_version"`
+	Architecture    string   `json:"architecture"`
+	AgentVersion    string   `json:"agent_version"`
+	Capabilities    []string `json:"capabilities"`
+	Addresses       []string `json:"addresses"`
+	CurrentUser     string   `json:"current_user,omitempty"`
+	InteractiveUser string   `json:"interactive_user,omitempty"`
 }
 type identity struct {
 	Server     string `json:"server"`
@@ -150,7 +151,7 @@ func info() metadata {
 			osVersion = strings.TrimSpace(string(output))
 		}
 	}
-	return metadata{host, runtime.GOOS, osVersion, runtime.GOARCH, version, caps, addresses, username}
+	return metadata{host, runtime.GOOS, osVersion, runtime.GOARCH, version, caps, addresses, username, interactiveUser()}
 }
 
 func statePath() string {
@@ -344,7 +345,7 @@ func connect(ctx context.Context, id identity) error {
 			}
 			slog.Warn("agent update failed", "error", err)
 		case <-ticker.C:
-			if err := mux.send(message{Version: 1, Type: "heartbeat"}); err != nil {
+			if err := mux.send(message{Version: 1, Type: "heartbeat", Metadata: info()}); err != nil {
 				return err
 			}
 		}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import RemoteNotice, { useRemoteNotice } from './RemoteNotice'
 
 type Device = { id: string; os_family: string; online: boolean; identity_state: string; capabilities: string[] }
 type Entry = { name: string; type: 'directory' | 'file'; size: number; modified_at: string }
@@ -17,6 +18,7 @@ export function parentPath(path: string, windows: boolean) {
   return path === '/' ? '/' : path.slice(0, path.lastIndexOf('/')) || '/'
 }
 export default function FilesPanel({ device, csrf }: { device: Device; csrf: string }) {
+  const { notice, notify, dismiss } = useRemoteNotice()
   const windows = device.os_family === 'windows'
   const [path, setPath] = useState(windows ? '' : '/')
   const [entries, setEntries] = useState<Entry[]>([])
@@ -73,7 +75,7 @@ export default function FilesPanel({ device, csrf }: { device: Device; csrf: str
     request.upload.onprogress = event => { if (event.lengthComputable) setUploadProgress(event.loaded / event.total) }
     request.onload = () => {
       setUploadProgress(null); upload.current = null
-      if (request.status >= 200 && request.status < 300) void refresh(path)
+      if (request.status >= 200 && request.status < 300) { notify('Upload completed.'); void refresh(path) }
       else { try { setError((JSON.parse(request.responseText) as { detail: string }).detail) } catch { setError('Upload failed') } }
     }
     request.onerror = () => { setUploadProgress(null); upload.current = null; setError('Upload failed') }
@@ -85,6 +87,7 @@ export default function FilesPanel({ device, csrf }: { device: Device; csrf: str
     try {
       const response = await fetch(`/api/file-transfers/${transfer.id}/cancel`, { method: 'POST', credentials: 'same-origin', headers: { 'Origin': location.origin, 'X-CSRF-Token': csrf } })
       if (!response.ok) throw new Error('Could not cancel transfer')
+      notify('Transfer cancelled.')
       if (transfer.direction === 'upload') upload.current?.abort()
       setTransfers(previous => previous.map(item => item.id === transfer.id ? { ...item, state: 'cancelled' } : item))
     } catch { setError('Could not cancel transfer') }
@@ -92,7 +95,7 @@ export default function FilesPanel({ device, csrf }: { device: Device; csrf: str
   if (!device.online) return <div className="placeholder compact">Device is offline.</div>
   if (!supported) return <div className="placeholder compact">Update the Jump agent to enable file transfer.</div>
   return <div className="files-panel details">
-    <h3>FILES</h3><div className="files-path">{path || 'This PC'}</div>
+    <RemoteNotice notice={notice} dismiss={dismiss} /><h3>FILES</h3><div className="files-path">{path || 'This PC'}</div>
     <button className="text-button" disabled={windows ? path === '' : path === '/'} onClick={() => void refresh(parentPath(path, windows))}>↑ Parent</button>
     {loading ? <p>Loading…</p> : <div className="files-list" aria-label="Remote files">
       {entries.map(entry => <button key={entry.name} type="button" className={selected?.name === entry.name ? 'file-entry selected' : 'file-entry'}

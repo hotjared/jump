@@ -6,6 +6,8 @@ import { SshSession } from './ssh-session'
 import { RdpSession } from './rdp-session'
 import { ScreenSession } from './screen-session'
 import ScreenPanel from './ScreenPanel'
+import CopyButton from './CopyButton'
+import { useAgentUpdates } from './agent-updates'
 import type { WorkspaceSession } from './SessionWorkspace'
 import QuickConnect, { type QuickPreference } from './QuickConnect'
 import Notice, { type NoticeMessage } from './Notice'
@@ -24,7 +26,7 @@ type Device = {
   id: string; device_uuid: string; hostname: string; display_name: string | null;
   os_family: string; os_version: string; architecture: string; agent_version: string;
   capabilities: string[]; addresses: string[]; primary_ip: string | null;
-  current_user: string | null; group: Named | null; tags: Named[];
+  current_user: string | null; agent_service_user?: string | null; group: Named | null; tags: Named[];
   online: boolean; identity_state: "active" | "revoked" | "none"; last_seen_at: string | null; enrolled_at: string; ssh_host_key: string | null;
   agent_update: UpdateInfo;
 }
@@ -157,6 +159,8 @@ export default function App() {
     }
     return response.json() as Promise<T>
   }
+  const updates = useAgentUpdates(devices, id => mutate(`/api/devices/${id}/agent-update`, 'POST'), () => refresh(true))
+
   async function action(task: () => Promise<void>) {
     setBusy(true); setError('')
     try { await task() } catch (e) { setError(e instanceof Error ? e.message : 'Request failed') }
@@ -196,7 +200,7 @@ export default function App() {
         {error && <div className="error" role="alert">{error}<button onClick={() => setError('')}>×</button></div>}
         <Notice notice={notice} dismiss={dismissNotice} />
         {page === 'Dashboard' && <>
-          <Dashboard devices={devices} sessions={sessions} events={events} open={id => { setActiveSessionId(id); setSelected(null) }} />
+          <Dashboard devices={devices} sessions={sessions} events={events} updates={updates} admin={user.role === 'admin'} open={id => { setActiveSessionId(id); setSelected(null) }} />
         </>}
         {page === 'Devices' && <>
           <div className="heading"><div><p className="eyebrow">YOUR INFRASTRUCTURE</p><h1>Devices <span className="count">{devices.length}</span></h1><p>Enrolled endpoints and their current connection state.</p></div>
@@ -243,9 +247,10 @@ export default function App() {
       <div className="drawer-title"><span className="os-icon">{device.os_family === 'windows' ? '⊞' : '⌘'}</span><div><h2>{device.display_name || device.hostname}</h2><span className={device.online ? 'badge online' : 'badge offline'}><i />{device.identity_state === 'revoked' ? 'Revoked' : device.online ? 'Online' : 'Offline'}</span></div></div>
       <div className="tabs">{['Overview','Remote','Terminal','Files','Actions'].map(t => <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>{t}</button>)}</div>
       {tab === 'Overview' ? <div className="details">
-        {[['Hostname',device.hostname],['Operating system',`${device.os_family} ${device.os_version}`],['Architecture',device.architecture],['IP address',device.primary_ip || '—'],['Current user',device.current_user || '—'],['Last check-in',formatDate(device.last_seen_at)],['Agent version',device.agent_version],['Enrolled',formatDate(device.enrolled_at)],['Capabilities',device.capabilities.join(', ') || '—']].map(([key,value]) => <div className="detail" key={key}><span>{key}</span><strong>{value}</strong></div>)}
-        <AgentUpdatePanel info={device.agent_update} name={device.display_name || device.hostname} online={device.online} active={device.identity_state === 'active'} admin={user.role === 'admin'} busy={busy} update={() => action(async () => { await mutate(`/api/devices/${device.id}/agent-update`, 'POST'); await refresh(true) })} />
-        <div className="detail"><span>Group</span>{user.role === 'admin' ? <select value={device.group?.id || ''} onChange={e => action(async () => { await mutate(`/api/devices/${device.id}`, 'PATCH', { display_name: device.display_name, group_id: e.target.value || null, tag_ids: device.tags.map(t => t.id) }); await refresh(true) })}><option value="">Ungrouped</option>{groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select> : <strong>{device.group?.name || 'Ungrouped'}</strong>}</div>
+        {[['Hostname',device.hostname],['Operating system',`${device.os_family} ${device.os_version}`],['Architecture',device.architecture],['IP address',device.primary_ip || '—'],['Current user',device.current_user || '—'],['Agent service identity',device.agent_service_user || '—'],['Last check-in',formatDate(device.last_seen_at)],['Agent version',device.agent_version],['Enrolled',formatDate(device.enrolled_at)],['Capabilities',device.capabilities.join(', ') || '—']].map(([key,value]) => <div className="detail" key={key}><span>{key}</span><strong>{value}</strong></div>)}
+        <AgentUpdatePanel info={device.agent_update} name={device.display_name || device.hostname} online={device.online} active={device.identity_state === 'active'} admin={user.role === 'admin'} busy={updates.running(device)} update={() => void updates.start(device)} />
+        {updates.attempts[device.id]?.error && <p className="error" role="alert">{updates.attempts[device.id].error}</p>}
+          <div className="detail"><span>Group</span>{user.role === 'admin' ? <select value={device.group?.id || ''} onChange={e => action(async () => { await mutate(`/api/devices/${device.id}`, 'PATCH', { display_name: device.display_name, group_id: e.target.value || null, tag_ids: device.tags.map(t => t.id) }); await refresh(true) })}><option value="">Ungrouped</option>{groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select> : <strong>{device.group?.name || 'Ungrouped'}</strong>}</div>
         <div className="detail"><span>Tags</span><div>{tags.map(t => <label className="tag-choice" key={t.id}><input type="checkbox" disabled={user.role !== 'admin' || busy} checked={device.tags.some(dt => dt.id === t.id)} onChange={() => action(async () => { const ids = device.tags.some(dt => dt.id === t.id) ? device.tags.filter(dt => dt.id !== t.id).map(dt => dt.id) : [...device.tags.map(dt => dt.id), t.id]; await mutate(`/api/devices/${device.id}`, 'PATCH', { display_name: device.display_name, group_id: device.group?.id || null, tag_ids: ids }); await refresh(true) })} />{t.name}</label>)}{!tags.length && '—'}</div></div>
         <section className="identity-control"><h3>Agent identity</h3><p>{device.identity_state === 'revoked' ? 'Revoked. This agent cannot reconnect. You may now permanently delete the device record.' : 'Revoking disconnects the agent and permanently rejects its current key. The device record is retained.'}</p>
           {user.role === 'admin' && device.identity_state === 'active' && <button className="button revoke-button" disabled={busy} onClick={() => {
@@ -269,7 +274,7 @@ export default function App() {
         </section>
       </div> : tab === 'Remote' ? <Suspense fallback={<div className="placeholder compact">Loading remote desktop…</div>}><>{device.os_family === 'windows' && <ScreenPanel device={device} admin={user.role === 'admin'} mutate={mutate} onConnected={openSession}
         existing={sessions.find((session): session is ScreenSession => session.deviceId === device.id && session.protocol === 'Screen')}
-        openExisting={() => { const session = sessions.find(item => item.deviceId === device.id && item.protocol === 'Screen'); if (session) { setActiveSessionId(session.id); setSelected(null) } }} />}<h3>Remote Desktop (RDP)</h3><RemotePanel key={device.id} device={device} admin={user.role === 'admin'} mutate={mutate}
+        openExisting={() => { const session = sessions.find(item => item.deviceId === device.id && item.protocol === 'Screen'); if (session) { setActiveSessionId(session.id); setSelected(null) } }} />}<RemotePanel key={device.id} device={device} admin={user.role === 'admin'} mutate={mutate}
         existing={sessions.find((session): session is RdpSession => session.deviceId === device.id && session.protocol === 'RDP')} onConnected={openSession}
         onOpenExisting={() => { const session = sessions.find(item => item.deviceId === device.id && item.protocol === 'RDP'); if (session) { setActiveSessionId(session.id); setSelected(null) } }} /></></Suspense>
       : tab === 'Terminal' ? <Suspense fallback={<div className="placeholder compact">Loading terminal…</div>}><TerminalPanel key={device.id} device={device} admin={user.role === 'admin'} mutate={mutate}
@@ -286,7 +291,7 @@ export default function App() {
         {platform === 'windows' && <small>Windows builds are currently unsigned; SmartScreen may show a warning.</small>}
       </section>
       {!issued ? <button className="button primary wide" disabled={busy} onClick={() => action(async () => setIssued(await mutate('/api/enrollment-tokens', 'POST', { os_family: platform })))}>Generate token</button>
-      : <><p className="warning">Shown once · expires {formatDate(issued.expires_at)}. Keep it private.</p><div className="token">{issued.token}</div><p>Run in {platform === 'windows' ? 'an elevated PowerShell window' : 'a terminal'} from the download directory:</p><pre>{enrollmentCommand(platform, issued.agent_url, issued.token)}</pre><p>The service keeps the device online after this terminal closes and starts automatically after reboot. Use <code>run</code> only for foreground troubleshooting.</p></>}
+      : <><p className="warning">Shown once · expires {formatDate(issued.expires_at)}. Keep it private.</p><div className="token"><span>{issued.token}</span><CopyButton value={issued.token} label="Copy enrollment code" /></div><p>Run in {platform === 'windows' ? 'an elevated PowerShell window' : 'a terminal'} from the download directory:</p><div className="copy-code"><CopyButton value={enrollmentCommand(platform, issued.agent_url, issued.token)} label="Copy commands" /><pre>{enrollmentCommand(platform, issued.agent_url, issued.token)}</pre></div><p>The service keeps the device online after this terminal closes and starts automatically after reboot. Use <code>run</code> only for foreground troubleshooting.</p></>}
     </div></div>}
   </div>
 }

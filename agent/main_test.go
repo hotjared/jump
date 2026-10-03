@@ -62,7 +62,7 @@ func TestEnrollmentAndAuthenticatedHeartbeat(t *testing.T) {
 			conn.WriteJSON(message{Version: 1, Type: "ready"})
 			var beat message
 			conn.SetReadDeadline(time.Now().Add(25 * time.Second))
-			if conn.ReadJSON(&beat) == nil && beat.Type == "heartbeat" {
+			if conn.ReadJSON(&beat) == nil && beat.Type == "heartbeat" && beat.Metadata.Hostname != "" {
 				heartbeat <- true
 			}
 		}

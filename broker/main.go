@@ -994,8 +994,14 @@ func (b *broker) ws(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			err := b.call(ctx, "POST", "/api/internal/devices/"+id+"/heartbeat",
-				map[string]string{"connection_id": connectionID}, nil)
+			presence := map[string]any{"connection_id": connectionID}
+			var snapshot struct {
+				Hostname string `json:"hostname"`
+			}
+			if json.Unmarshal(msg.Metadata, &snapshot) == nil && snapshot.Hostname != "" {
+				presence["metadata"] = msg.Metadata
+			}
+			err := b.call(ctx, "POST", "/api/internal/devices/"+id+"/heartbeat", presence, nil)
 			cancel()
 			if err != nil {
 				return

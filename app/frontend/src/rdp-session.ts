@@ -7,7 +7,10 @@ export class RdpSession {
   readonly protocol = 'RDP' as const
   state: SessionState = 'connecting'
   error = ''
-  clipboardError = ''
+  clipboardNoticeVersion = 0
+  private clipboardErrorText = ''
+  get clipboardError() { return this.clipboardErrorText }
+  set clipboardError(value: string) { this.clipboardErrorText = value; if (value) this.clipboardNoticeVersion++ }
   hasRemoteClipboard = false
   private remoteClipboard: string | null = null
   private listeners = new Set<() => void>()
@@ -22,6 +25,7 @@ export class RdpSession {
   private notify() { this.listeners.forEach(listener => listener()) }
 
   async pasteLocalClipboardToRemote() {
+    this.clipboardError = ''; this.notify()
     if (this.state !== 'connected' || !this.client) return false
     try {
       const value = await navigator.clipboard.readText()
@@ -49,6 +53,7 @@ export class RdpSession {
   }
 
   async copyRemoteClipboardToLocal() {
+    this.clipboardError = ''; this.notify()
     if (this.state !== 'connected' || this.remoteClipboard === null) return false
     try {
       await navigator.clipboard.writeText(this.remoteClipboard)
