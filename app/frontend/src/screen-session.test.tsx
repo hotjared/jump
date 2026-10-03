@@ -30,6 +30,65 @@ function active(capabilities = ['screen_control_v1', 'screen_control_v2']) {
 }
 
 describe('screen control', () => {
+  it('answers liveness challenges without frames or input', async () => {
+    const session = active()
+    Socket.last.onmessage?.({ data: JSON.stringify({ type: 'screen_ping', nonce: 'challenge' }) })
+    await waitFor(() => expect(Socket.last.send).toHaveBeenCalledWith(JSON.stringify({ type: 'screen_pong', nonce: 'challenge' })))
+    expect(session.state).toBe('connected')
+    session.disconnect()
+  })
+  it.each(['pagehide', 'beforeunload'])('closes the controller on %s and removes lifecycle listeners', event => {
+    const session = active(); const socket = Socket.last
+    window.dispatchEvent(new Event(event))
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({ type: 'screen_close' }))
+    expect(socket.close).toHaveBeenCalledOnce()
+    window.dispatchEvent(new Event(event))
+    expect(socket.close).toHaveBeenCalledOnce()
+    expect(session.state).toBe('disconnected')
+  })
+  it('preserves Open Screen session for a live in-memory controller', () => {
+    const session = active(); const open = vi.fn(); const mutate = vi.fn()
+    const device = { id: 'device', hostname: 'PC', display_name: null, online: true, os_family: 'windows', capabilities: ['screen_control_v1'] }
+    const view = render(<ScreenPanel device={device} admin mutate={mutate} onConnected={() => {}} existing={session} openExisting={open} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Open Screen session' }))
+    expect(open).toHaveBeenCalledOnce(); expect(mutate).not.toHaveBeenCalled()
+    view.unmount(); session.disconnect()
+  })
+  it('offers explicit replacement and waits for termination before creating it', async () => {
+    const device = { id: 'device', hostname: 'PC', display_name: null, online: true, os_family: 'windows', capabilities: ['screen_control_v1'] }
+    let release: (value: unknown) => void = () => {}
+    const mutate = vi.fn().mockRejectedValueOnce(new Error('A Screen Control session is already active.'))
+      .mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+      .mockResolvedValueOnce({ id: 'replacement' })
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ id: 'old-session' }) } as Response)
+    const connected = vi.fn()
+    const view = render(<ScreenPanel device={device} admin mutate={mutate} onConnected={connected} openExisting={() => {}} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Screen Control' }))
+    const recover = await screen.findByRole('button', { name: 'End existing session and reconnect' })
+    fireEvent.click(recover)
+    await waitFor(() => expect(mutate).toHaveBeenCalledTimes(2))
+    expect(mutate.mock.calls[1]).toEqual(['/api/devices/device/screen-sessions/old-session/close', 'POST', {}])
+    expect(connected).not.toHaveBeenCalled()
+    release({ ok: true })
+    await waitFor(() => expect(connected).toHaveBeenCalledOnce())
+    expect(mutate.mock.calls[2]).toEqual(['/api/devices/device/screen-sessions', 'POST', {}])
+    connected.mock.calls[0][0].disconnect(); view.unmount()
+  })
+  it('does not offer recovery for another administrator or create after failed teardown', async () => {
+    const device = { id: 'device', hostname: 'PC', display_name: null, online: true, os_family: 'windows', capabilities: ['screen_control_v1'] }
+    const mutate = vi.fn().mockRejectedValue(new Error('A Screen Control session is already active.'))
+    const lookup = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ id: null }) } as Response)
+    const view = render(<ScreenPanel device={device} admin mutate={mutate} onConnected={() => {}} openExisting={() => {}} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Screen Control' }))
+    await screen.findByText('Screen Control is in use. Try again after the current session ends.')
+    expect(screen.queryByRole('button', { name: 'End existing session and reconnect' })).toBeNull()
+    lookup.mockResolvedValue({ ok: true, json: async () => ({ id: 'old' }) } as Response)
+    fireEvent.click(screen.getByRole('button', { name: 'Screen Control' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'End existing session and reconnect' }))
+    await waitFor(() => expect(mutate).toHaveBeenCalledTimes(3))
+    expect(mutate.mock.calls[2][0]).toBe('/api/devices/device/screen-sessions/old/close')
+    view.unmount()
+  })
   it('gates capability and starts a credential-free screen session', async () => {
     const device = { id: 'device', hostname: 'PC', display_name: null, online: true, os_family: 'windows', capabilities: [] as string[] }
     const mutate = vi.fn().mockResolvedValue({ id: 'screen' }); const connected = vi.fn()

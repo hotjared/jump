@@ -95,7 +95,10 @@ type sessionRoute struct {
 	toAgentBytes      atomic.Uint64
 	toJumpBytes       atomic.Uint64
 
-	screenV2 bool // Negotiated against this route's authenticated agent connection.
+	screenV2          bool // Negotiated against this route's authenticated agent connection.
+	screenClosing     bool
+	screenReleased    chan struct{}
+	screenReleaseOnce sync.Once
 }
 
 func (r *sessionRoute) markClose(reason string) {
@@ -144,7 +147,7 @@ func (b *broker) closeRoute(id string, route *sessionRoute) {
 	route.once.Do(func() {
 		route.markClose("route_cleanup")
 		b.mu.Lock()
-		if b.sessions[id] == route {
+		if b.sessions[id] == route && route.screenReleased == nil {
 			delete(b.sessions, id)
 		}
 		b.mu.Unlock()
@@ -1028,6 +1031,10 @@ func (b *broker) closeRouteForAgent(route *sessionRoute) {
 	for id, candidate := range b.sessions {
 		if candidate == route {
 			b.mu.Unlock()
+			if route.protocol == "screen" && route.screenReleased != nil {
+				b.releaseScreenRoute(id, route)
+				return
+			}
 			b.closeRoute(id, route)
 			return
 		}
@@ -1127,6 +1134,7 @@ func main() {
 	internalMux.HandleFunc("GET /internal/sessions/{id}", b.internalSession)
 	internalMux.HandleFunc("GET /internal/rdp-streams/{id}", b.internalTCP)
 	internalMux.HandleFunc("GET /internal/screen-streams/{id}", b.internalScreen)
+	internalMux.HandleFunc("POST /internal/screen-streams/{id}/close", b.internalScreenClose)
 	internalMux.HandleFunc("GET /internal/file-streams/{id}", b.internalFile)
 	internalMux.HandleFunc("POST /internal/file-streams/{id}/cancel", b.cancelFile)
 	internalServer := &http.Server{Addr: ":8081", Handler: internalMux, ReadHeaderTimeout: 5 * time.Second}

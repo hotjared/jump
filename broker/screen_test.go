@@ -137,6 +137,8 @@ func testPrivateScreenRouting(t *testing.T, supportsV2 bool, screenVersion int) 
 			}
 			events <- m
 			switch m.Type {
+			case "screen_close":
+				_ = agent.WriteJSON(message{Version: 1, Type: "screen_close", SessionID: m.SessionID})
 			case "screen_open":
 				_ = agent.WriteJSON(message{Version: 1, Type: "screen_opened", SessionID: m.SessionID})
 			case "screen_mode":

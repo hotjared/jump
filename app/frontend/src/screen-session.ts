@@ -43,15 +43,22 @@ export class ScreenSession {
   private closed = false
   private changingMode = false
   private lastFrame = 0
+  private pageExit = () => this.disconnect()
+  private removeLifecycleListeners() {
+    window.removeEventListener('pagehide', this.pageExit)
+    window.removeEventListener('beforeunload', this.pageExit)
+  }
 
   constructor(public id: string, public deviceId: string, public name: string, public platform: string, public readonly capabilities: readonly string[] = []) {
     const url = new URL(`/ws/screen-sessions/${id}`, location.href)
     url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
     this.socket = new WebSocket(url)
     this.socket.binaryType = 'arraybuffer'
+    window.addEventListener('pagehide', this.pageExit)
+    window.addEventListener('beforeunload', this.pageExit)
     this.socket.onmessage = event => { void this.receive(event.data) }
     this.socket.onerror = () => { this.error = 'Could not connect to Screen Control'; this.state = 'error'; this.notify() }
-    this.socket.onclose = () => { this.rejectOperation('Screen session ended.'); this.closed = true; this.latest = null; if (this.state !== 'error') this.state = 'disconnected'; this.notify() }
+    this.socket.onclose = () => { this.removeLifecycleListeners(); this.rejectOperation('Screen session ended.'); this.closed = true; this.latest = null; if (this.state !== 'error') this.state = 'disconnected'; this.notify() }
   }
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private notify() { this.listeners.forEach(listener => listener()) }
@@ -70,10 +77,14 @@ export class ScreenSession {
         this.send({ type: 'screen_ack', frame_id: id })
       } else if (typeof data === 'string') {
         const f = JSON.parse(data)
+        if (f.type === 'screen_ping' && typeof f.nonce === 'string' && f.nonce.length <= 36) {
+          this.send({ type: 'screen_pong', nonce: f.nonce }); return
+        }
         if (f.type === 'status' && f.state === 'active') this.state = 'connected'
         else if (f.type === 'status' && f.state === 'closed') {
           this.error = ['session_closed', 'browser_disconnected'].includes(f.code) ? '' : f.message || 'Screen session ended'
           this.rejectOperation('Screen session ended.'); this.state = this.error ? 'error' : 'disconnected'; this.closed = true; this.latest = null
+          this.removeLifecycleListeners()
         } else if (['screen_clipboard', 'screen_clipboard_ack', 'screen_operation_result'].includes(f.type)) this.operationResponse(f)
         else if (f.type === 'screen_mode' && ['control', 'view'].includes(f.mode)) { this.mode = f.mode; this.changingMode = false }
         else throw new Error()
@@ -238,6 +249,8 @@ export class ScreenSession {
     return () => { attached = false; this.release(); document.removeEventListener('visibilitychange', hidden); if (this.renderFrame === render) this.renderFrame = null; canvas.remove() }
   }
   disconnect() {
+    this.removeLifecycleListeners()
+    if (this.closed) return
     this.rejectOperation('Screen session ended.'); this.release(); this.send({ type: 'screen_close' }); this.closed = true; this.latest = null
     this.socket.close(); this.state = 'disconnected'; this.notify()
   }

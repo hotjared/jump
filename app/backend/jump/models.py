@@ -189,6 +189,7 @@ class RemoteSession(Base):
     last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     failure_reason: Mapped[str | None] = mapped_column(String(64))
     request_id: Mapped[str | None] = mapped_column(String(36))
+    screen_close_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         Index("ix_remote_sessions_device", "device_id"),
         Index(
