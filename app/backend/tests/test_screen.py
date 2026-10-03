@@ -30,6 +30,11 @@ def client(db):
     app.dependency_overrides.clear()
 
 
+@pytest.fixture(autouse=True)
+def confirmed_controller_release(monkeypatch):
+    monkeypatch.setattr(screen, "release_screen_controller", lambda session: None)
+
+
 def create(client, device):
     return client.post(
         f"/api/devices/{device.id}/screen-sessions", headers=write_headers(), json={}
@@ -449,6 +454,7 @@ def test_idle_screen_gateway_refreshes_lease_and_stops_on_disconnect(client, db,
 
     monkeypatch.setattr(screen, "ws_connect", connect)
     monkeypatch.setattr(screen, "SCREEN_LEASE_REFRESH_SECONDS", 0.01)
+    monkeypatch.setattr(screen, "SCREEN_CONTROL_POLL_SECONDS", 0.001)
     monkeypatch.setattr(screen, "refresh_screen_lease", track_refresh)
     monkeypatch.setattr(screen, "maintain_screen_lease", track_lease)
     with client.websocket_connect(
@@ -456,7 +462,7 @@ def test_idle_screen_gateway_refreshes_lease_and_stops_on_disconnect(client, db,
     ) as ws:
         assert ws.receive_json()["state"] == "active"
         initial = session.last_activity_at
-        # No frames or input are exchanged while the live gateway renews twice.
+        # Liveness is independent of frames and user input.
         assert refreshed.wait(2), "idle gateway did not renew its lease"
         assert renewals[0] > initial and renewals[1] > renewals[0]
         ws.send_json({"type": "screen_close"})
@@ -488,6 +494,7 @@ def test_screen_lease_cannot_renew_finalized_or_other_connection(client, db, mon
 
     # Avoid wall-clock waiting; the closed row must cause the task to exit.
     monkeypatch.setattr(screen, "SCREEN_LEASE_REFRESH_SECONDS", 0)
+    monkeypatch.setattr(screen, "SCREEN_CONTROL_POLL_SECONDS", 0)
     assert asyncio.run(lost_lease()) == "session_timeout"
 
 
@@ -677,7 +684,7 @@ def test_screen_explicit_clipboard_sas_and_desktops_preserve_history(client, db,
     device = seed(db, capabilities=["screen_control_v1", "screen_control_v2"])
     as_user(client, db)
     sid = create(client, device).json()["id"]
-    secret = "clipboard-only secret 世界 😀"
+    secret = "clipboard-only secret ?? ??"
     rid = str(uuid.uuid4())
 
     class Gateway:

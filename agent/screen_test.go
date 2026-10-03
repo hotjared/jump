@@ -376,3 +376,4 @@ func TestLegacyScreenServerReceivesOnlyV1Traffic(t *testing.T) {
 	default:
 	}
 }
+

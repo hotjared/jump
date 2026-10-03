@@ -67,6 +67,16 @@ func (m *screenMux) handle(msg message) bool {
 	m.mu.Lock()
 	s, id := m.stream, m.id
 	m.mu.Unlock()
+	if msg.Type == "screen_close" {
+		// Acknowledge only after the helper is closed and the slot is empty.
+		// Repeated closes and closes for a never-opened session are safe too.
+		if s != nil && id == msg.SessionID {
+			m.close(s)
+			<-s.finished
+		}
+		_ = m.send(message{Version: 1, Type: "screen_close", SessionID: msg.SessionID})
+		return true
+	}
 	if msg.Type == "screen_open" {
 		if s != nil {
 			_ = m.send(message{Version: 1, Type: "screen_error", SessionID: msg.SessionID, Code: "screen_busy"})
