@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { readFileSync } from 'node:fs'
+import styles from './style.css?raw'
 import RemoteNotice, { useRemoteNotice } from './RemoteNotice'
 import SessionWorkspace from './SessionWorkspace'
 import { RdpSession } from './rdp-session'
@@ -47,7 +47,7 @@ it.each(['RDP', 'Screen'] as const)('keeps %s action feedback outside the measur
   expect(toast.parentElement).toBe(area)
   expect(display.contains(toast)).toBe(false)
   const style = document.createElement('style')
-  style.textContent = readFileSync('src/style.css', 'utf8')
+  style.textContent = styles
   document.head.append(style)
   expect(getComputedStyle(toast).position).toBe('absolute')
   act(() => vi.advanceTimersByTime(6000))
