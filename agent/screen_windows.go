@@ -64,7 +64,12 @@ func (p *desktopPipe) Write(b []byte) (int, error) {
 			return total, e
 		}
 		var n uint32
-		e := windows.WriteFile(p.handle, b, &n, nil)
+		// PIPE_NOWAIT can make no progress on a write larger than the pipe's
+		// quota, even with a reader waiting. JSON/base64 desktop frames routinely
+		// exceed the 64 KiB pipe buffer. Stream bounded writes through the byte
+		// pipe; preserve partial-write accounting and cancellation between chunks.
+		chunk := b[:min(len(b), screenChunkBytes)]
+		e := windows.WriteFile(p.handle, chunk, &n, nil)
 		if e != nil && e != windows.ERROR_NO_DATA {
 			return total, e
 		}
@@ -459,6 +464,10 @@ func desktopHelper(args []string) error {
 			delete(trace.last, "desktop_attach")
 		}
 		trace.record("desktop_attach", "", r != 0, screenWin32Code(e), "")
+		if r != 0 {
+			active, _, e := screenUser32.NewProc("GetThreadDesktop").Call(uintptr(windows.GetCurrentThreadId()))
+			trace.record("desktop_thread", "", active == h, screenWin32Code(e), "")
+		}
 		return r != 0
 	}
 	defer func() {

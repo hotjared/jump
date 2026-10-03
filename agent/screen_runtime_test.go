@@ -29,4 +29,9 @@ func TestScreenRuntimeDiagnosticsAreSafeAndBounded(t *testing.T) {
 	if len(records) != 5 {
 		t.Fatal("first capture after same-name reattachment hidden")
 	}
+	trace.record("desktop_thread", "", true, 999, "")
+	trace.record("desktop_thread", "", true, 999, "")
+	if len(records) != 6 || records[5].Win32 != 0 || !records[5].Success {
+		t.Fatal("thread attachment verification is missing, stale or unbounded")
+	}
 }
