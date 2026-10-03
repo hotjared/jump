@@ -73,3 +73,19 @@
 *::-webkit-scrollbar-thumb{background:#4b5056;border-radius:8px;border:2px solid #17191b}
 *::-webkit-scrollbar-thumb:hover{background:#626870}
 .login-card{width:min(410px,calc(100vw - 30px))}.login-form{display:grid;gap:15px;text-align:left;margin:24px 0}.login-form label{display:grid;gap:7px;color:#d9dbde;font-size:12px}.login-form input{width:100%}.login-form button{width:100%;margin-top:5px}.login-divider{color:#999fa6;font-size:12px;margin:18px 0}.login-card>a.button{display:block}
+
+
+/* Shared flyout sections keep their headings and controls on one inset. */
+.terminal-panel.remote-section { flex: initial; }
+.remote-section h3 { margin-top: 0; }
+.remote-session-area { display: flex; position: relative; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.remote-notice { position: absolute; top: 12px; right: 12px; z-index: 5; max-width: min(480px, calc(100% - 24px)); display: flex; align-items: center; gap: 12px; padding: 10px 14px; border: 1px solid #454a51; border-radius: 8px; background: #25292f; color: #e9eaed; box-shadow: 0 4px 16px #0006; font-size: 12px; overflow-wrap: anywhere; }
+.remote-notice-error { border-color: #a75f5f; color: #efb1b1; }
+.files-panel { position: relative; }
+.token { display: flex; align-items: center; gap: 12px; }
+.token > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.copy-button { flex-shrink: 0; padding: 7px 10px; }
+.copy-code { position: relative; }
+.copy-code > .copy-button { position: absolute; top: 8px; right: 8px; }
+.copy-code > pre { padding-top: 48px; }
+.copy-button:focus-visible, .remote-notice button:focus-visible { outline: 2px solid #dce5ed; outline-offset: 2px; }

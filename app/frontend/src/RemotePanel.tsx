@@ -30,7 +30,7 @@ export default function RemotePanel({ device, admin, mutate, existing, onConnect
   if (!admin)
     return <div className="placeholder compact"><h2>Admin access required</h2><p>RDP access is currently limited to Jump administrators.</p></div>
   if (existing && ['connected', 'connecting'].includes(existing.state))
-    return <div className="terminal-panel"><h3>RDP session active</h3><p className="muted">{device.display_name || device.hostname} is open in the workspace.</p><button className="button primary" onClick={onOpenExisting}>Open session</button></div>
+    return <div className="terminal-panel remote-section"><h3>Remote Desktop (RDP)</h3><p className="muted">{device.display_name || device.hostname} is open in the workspace.</p><button className="button primary" onClick={onOpenExisting}>Open session</button></div>
 
   async function connect() {
     if (!selected || busy) return
@@ -45,7 +45,8 @@ export default function RemotePanel({ device, admin, mutate, existing, onConnect
   }
 
 
-  return <div className="terminal-panel">
+  return <div className="terminal-panel remote-section">
+    <h3>Remote Desktop (RDP)</h3>
     <p className="muted">RDP through the connected Jump agent to Windows localhost:3389. Enable Remote Desktop on the device first.</p>
     {!device.online && <p role="status">Offline. Connect the agent before starting RDP.</p>}
     <div className="terminal-controls"><select aria-label="Windows credential" value={selected} onChange={e => setSelected(e.target.value)}>

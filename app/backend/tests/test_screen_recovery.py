@@ -1,6 +1,7 @@
 import asyncio
 import json
 import uuid
+from threading import Event
 
 import pytest
 from fastapi import HTTPException
@@ -97,6 +98,14 @@ def test_browser_close_releases_before_finalization(client, db, monkeypatch, exp
         released.append(session.id)
 
     monkeypatch.setattr(screen, "release_screen_controller", release)
+    finalized = Event()
+    original_finish = screen.finish_released_screen
+
+    def finish(*args):
+        original_finish(*args)
+        finalized.set()
+
+    monkeypatch.setattr(screen, "finish_released_screen", finish)
     with client.websocket_connect(
         f"/ws/screen-sessions/{sid}", headers={"Host": "localhost", "Origin": ORIGIN}
     ) as ws:
@@ -104,6 +113,12 @@ def test_browser_close_releases_before_finalization(client, db, monkeypatch, exp
         if explicit:
             ws.send_json({"type": "screen_close"})
             assert ws.receive_json()["code"] == "session_closed"
+        else:
+            # Keep the application task alive until browser-disconnect cleanup
+            # completes; TestClient context teardown otherwise cancels it while
+            # the existing controller-release thread is still running.
+            ws.close()
+        assert finalized.wait(2)
     assert released == [uuid.UUID(sid)]
     assert db.get(RemoteSession, uuid.UUID(sid)).state == "closed"
     assert create(client, device).status_code == 201

@@ -2,6 +2,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import RemotePanel from './RemotePanel'
+import ScreenPanel from './ScreenPanel'
+import styles from './style.css?raw'
 
 const base = { id: 'device', hostname: 'srv01', display_name: null, online: true,
   os_family: 'windows', capabilities: ['rdp', 'rdp_tunnel_v1'] }
@@ -10,6 +12,23 @@ type Mutate = <T>(url: string, method: string, body?: unknown) => Promise<T>
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 describe('remote desktop eligibility and credentials', () => {
+  it('uses the same section inset for both remote headings, descriptions and controls', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => [credential] })))
+    render(<><ScreenPanel device={base} admin mutate={vi.fn()} onConnected={() => {}} openExisting={() => {}} />
+      <RemotePanel device={base} admin mutate={vi.fn()} onConnected={() => {}} onOpenExisting={() => {}} /></>)
+    await screen.findByRole('option', { name: 'Admin (LAB\\Administrator)' })
+    const control = screen.getByRole('heading', { name: 'Screen Control' }).parentElement!
+    const rdp = screen.getByRole('heading', { name: 'Remote Desktop (RDP)' }).parentElement!
+    expect(control.className).toBe(rdp.className)
+    expect(rdp.contains(screen.getByRole('combobox', { name: 'Windows credential' }))).toBe(true)
+    expect(rdp.contains(screen.getByRole('button', { name: 'Connect' }))).toBe(true)
+    const style = document.createElement('style')
+    style.textContent = styles
+    document.head.append(style)
+    expect(getComputedStyle(rdp).paddingLeft).toBe('20px')
+    expect(getComputedStyle(control).paddingLeft).toBe(getComputedStyle(rdp).paddingLeft)
+    style.remove()
+  })
   it('does not offer browser RDP to old Windows agents or Linux', () => {
     const mutate = vi.fn()
     const connect = vi.fn()

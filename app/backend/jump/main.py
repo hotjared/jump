@@ -27,7 +27,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
@@ -266,7 +266,8 @@ def serialize_device(device: Device, db: Session | None = None) -> dict:
         "capabilities": device.capabilities,
         "addresses": device.addresses,
         "primary_ip": device.primary_ip,
-        "current_user": device.current_user,
+        "current_user": device.interactive_user if device.online else None,
+        "agent_service_user": device.current_user,
         "group": {"id": str(device.group.id), "name": device.group.name} if device.group else None,
         "tags": [{"id": str(tag.id), "name": tag.name} for tag in device.tags],
         "online": device.online,
@@ -575,9 +576,13 @@ def list_file_transfers(
             FileTransfer.device_id == device_id,
             FileTransfer.user_id == user.id,
             FileTransfer.direction.in_(("upload", "download")),
+            or_(
+                FileTransfer.state.in_(("pending", "active")),
+                func.coalesce(FileTransfer.completed_at, FileTransfer.last_activity_at)
+                >= now() - timedelta(seconds=60),
+            ),
         )
         .order_by(FileTransfer.created_at.desc())
-        .limit(20)
     ).all()
     for transfer in transfers:
         if transfer.state in ("pending", "active") and now() - transfer.last_activity_at.replace(
@@ -1587,6 +1592,7 @@ def enroll(body: EnrollRequest, db: Session = Depends(get_db)):
         capabilities=body.metadata.capabilities,
         addresses=body.metadata.addresses,
         current_user=body.metadata.current_user,
+        interactive_user=body.metadata.interactive_user,
         primary_ip=body.metadata.addresses[0] if body.metadata.addresses else None,
     )
     db.add(device)
@@ -1626,6 +1632,7 @@ def apply_metadata(device: Device, data: Metadata) -> None:
         "capabilities",
         "addresses",
         "current_user",
+        "interactive_user",
     ):
         setattr(device, attr, getattr(data, attr))
     device.primary_ip = data.addresses[0] if data.addresses else None
@@ -1706,6 +1713,10 @@ def agent_update_status(device_id: uuid.UUID, body: dict, db: Session = Depends(
 
 @app.post("/api/internal/devices/{device_id}/heartbeat", dependencies=[Depends(internal)])
 def heartbeat(device_id: uuid.UUID, body: PresenceInput, db: Session = Depends(get_db)):
+    values = {"last_seen_at": now()}
+    if body.metadata:
+        values["interactive_user"] = body.metadata.interactive_user
+        values["current_user"] = body.metadata.current_user
     result = db.execute(
         update(Device)
         .where(
@@ -1716,7 +1727,7 @@ def heartbeat(device_id: uuid.UUID, body: PresenceInput, db: Session = Depends(g
                 select(AgentIdentity.device_id).where(AgentIdentity.revoked_at.is_(None))
             ),
         )
-        .values(last_seen_at=now())
+        .values(**values)
     )
     db.commit()
     if not result.rowcount:

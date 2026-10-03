@@ -93,6 +93,7 @@ class Device(Base):
     addresses: Mapped[list] = mapped_column(JSON, default=list)
     primary_ip: Mapped[str | None] = mapped_column(String(45))
     current_user: Mapped[str | None] = mapped_column(String(255))
+    interactive_user: Mapped[str | None] = mapped_column(String(255))
     group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"))
     group: Mapped[Group | None] = relationship()
     tags: Mapped[list[Tag]] = relationship(secondary=device_tags, lazy="selectin")
