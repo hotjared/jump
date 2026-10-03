@@ -5,13 +5,14 @@ import uuid
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 from test_api import ORIGIN, as_user, write_headers
 from test_rdp import seed
 from test_screen import create
 
 from jump import screen
-from jump.db import get_db
+from jump.db import Base, get_db
 from jump.main import app
 from jump.models import AuditEvent, RemoteSession, Role
 
@@ -23,6 +24,30 @@ def client(db, monkeypatch):
     with TestClient(app, base_url=ORIGIN) as connection:
         yield connection
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def recovery_client(tmp_path, monkeypatch):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'recovery.db'}",
+        connect_args={"check_same_thread": False, "timeout": 10},
+    )
+    Base.metadata.create_all(engine)
+
+    def independent_db():
+        with Session(engine, expire_on_commit=False) as session:
+            yield session
+
+    monkeypatch.setattr(screen, "release_screen_controller", lambda session: None)
+    app.dependency_overrides[get_db] = independent_db
+    try:
+        with Session(engine, expire_on_commit=False) as db, TestClient(
+            app, base_url=ORIGIN
+        ) as connection:
+            yield connection, db
+    finally:
+        app.dependency_overrides.clear()
+        engine.dispose()
 
 
 class IdleGateway:
@@ -138,9 +163,13 @@ def test_recovery_releases_controller_and_finalizes_once(client, db, monkeypatch
     assert client.get(f"/api/devices/{device.id}/screen-sessions/current").json() == {"id": sid}
     assert client.post(endpoint, headers=write_headers(), json={}).status_code == 200
     assert len(released) == 1 and session.state == "closed"
-    monkeypatch.setattr(screen, "release_screen_controller", lambda current: released.append(current.id))
+    monkeypatch.setattr(
+        screen, "release_screen_controller", lambda current: released.append(current.id)
+    )
     assert client.post(endpoint, headers=write_headers(), json={}).status_code == 200
-    events = list(db.scalars(select(AuditEvent).where(AuditEvent.event_type == "screen_session_ended")))
+    events = list(
+        db.scalars(select(AuditEvent).where(AuditEvent.event_type == "screen_session_ended"))
+    )
     assert len(events) == 1
     assert create(client, device).status_code == 201
 
@@ -171,7 +200,9 @@ def test_recovery_authorization_csrf_owner_and_protocol(client, db, monkeypatch)
     sid = create(client, device).json()["id"]
     endpoint = f"/api/devices/{device.id}/screen-sessions/{sid}/close"
     release = []
-    monkeypatch.setattr(screen, "release_screen_controller", lambda session: release.append(session.id))
+    monkeypatch.setattr(
+        screen, "release_screen_controller", lambda session: release.append(session.id)
+    )
     assert client.post(endpoint, json={}).status_code == 403
     as_user(client, db, role=Role.USER)
     assert client.post(endpoint, headers=write_headers(), json={}).status_code == 403
@@ -188,20 +219,26 @@ def test_recovery_authorization_csrf_owner_and_protocol(client, db, monkeypatch)
     assert release == []
 
 
-def test_recovery_wakes_existing_gateway(client, db, monkeypatch):
+def test_recovery_wakes_existing_gateway(recovery_client, monkeypatch):
+    client, db = recovery_client
     device, sid, gateway = open_idle(client, db, monkeypatch)
     monkeypatch.setattr(screen, "SCREEN_CONTROL_POLL_SECONDS", 0.001)
     with client.websocket_connect(
         f"/ws/screen-sessions/{sid}", headers={"Host": "localhost", "Origin": ORIGIN}
     ) as ws:
         assert ws.receive_json()["state"] == "active"
-        assert client.post(
-            f"/api/devices/{device.id}/screen-sessions/{sid}/close",
-            headers=write_headers(),
-            json={},
-        ).status_code == 200
+        assert (
+            client.post(
+                f"/api/devices/{device.id}/screen-sessions/{sid}/close",
+                headers=write_headers(),
+                json={},
+            ).status_code
+            == 200
+        )
         assert ws.receive_json()["state"] == "closed"
     assert gateway.closed
-    ended = list(db.scalars(select(AuditEvent).where(AuditEvent.event_type == "screen_session_ended")))
+    ended = list(
+        db.scalars(select(AuditEvent).where(AuditEvent.event_type == "screen_session_ended"))
+    )
     assert len(ended) == 1
     assert create(client, device).status_code == 201

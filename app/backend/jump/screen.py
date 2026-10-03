@@ -92,7 +92,28 @@ def close_screen_session(db: Session, session: RemoteSession, reason: str) -> No
     db.commit()
     release_screen_controller(session)
     db.refresh(session, with_for_update=True)
-    finish_remote_session(db, session, reason)
+    finish_released_screen(db, session, reason)
+
+
+def finish_released_screen(db: Session, session: RemoteSession, reason: str) -> None:
+    # Claim finalization within the same transaction as history insertion.
+    # PostgreSQL row locks serialize gateways/recovery; the conditional write
+    # also protects SQLite and callers holding an outdated ORM object.
+    claimed = db.execute(
+        update(RemoteSession)
+        .where(
+            RemoteSession.id == session.id,
+            RemoteSession.protocol == "screen",
+            RemoteSession.state.in_(("connecting", "active")),
+            RemoteSession.closed_at.is_(None),
+        )
+        .values(closed_at=now())
+    )
+    if claimed.rowcount:
+        finish_remote_session(db, session, reason)
+    else:
+        db.commit()
+        db.refresh(session)
 
 
 @router.get("/api/devices/{device_id}/screen-sessions/current")
@@ -802,7 +823,7 @@ async def browser_screen(ws: WebSocket, session_id: uuid.UUID, db: Session = Dep
             db.commit()
         else:
             db.refresh(session, with_for_update=True)
-            finish_remote_session(db, session, reason)
+            finish_released_screen(db, session, reason)
         try:
             await ws.send_json(
                 {
