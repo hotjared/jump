@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import RemotePanel from './RemotePanel'
 import ScreenPanel from './ScreenPanel'
-import styles from './style.css?raw'
+import { readFileSync } from 'node:fs'
 
 const base = { id: 'device', hostname: 'srv01', display_name: null, online: true,
   os_family: 'windows', capabilities: ['rdp', 'rdp_tunnel_v1'] }
@@ -23,7 +23,7 @@ describe('remote desktop eligibility and credentials', () => {
     expect(rdp.contains(screen.getByRole('combobox', { name: 'Windows credential' }))).toBe(true)
     expect(rdp.contains(screen.getByRole('button', { name: 'Connect' }))).toBe(true)
     const style = document.createElement('style')
-    style.textContent = styles
+    style.textContent = readFileSync('src/style.css', 'utf8')
     document.head.append(style)
     expect(getComputedStyle(rdp).paddingLeft).toBe('20px')
     expect(getComputedStyle(control).paddingLeft).toBe(getComputedStyle(rdp).paddingLeft)

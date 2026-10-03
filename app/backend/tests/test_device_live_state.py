@@ -39,7 +39,10 @@ def test_current_user_refreshes_on_heartbeat_and_clears_on_logoff(client, db):
     db.refresh(target)
     assert client.get(f"/api/devices/{target.id}").json()["current_user"] == "jared"
     # An old/replaced connection cannot change endpoint state.
-    assert client.post(url, json={**presence, "connection_id": "old"}, headers=BROKER).status_code == 409
+    assert (
+        client.post(url, json={**presence, "connection_id": "old"}, headers=BROKER).status_code
+        == 409
+    )
     data["interactive_user"] = None
     assert client.post(url, json=presence, headers=BROKER).status_code == 200
     db.refresh(target)

@@ -70,7 +70,7 @@ export default function Dashboard({ devices, sessions, events, open, updates, ad
         <span className="dashboard-issue-mark" aria-hidden="true">!</span><div className="dashboard-row-main"><strong>{item.title}</strong><span>{item.device}</span>{item.detail && <small>{item.detail}</small>}</div>
         {item.target && updates && <div className="dashboard-update-action">
           {updates.attempts[item.target.id]?.error && <small role="alert">{updates.attempts[item.target.id].error}</small>}
-          {item.target.identity_state === 'active' && item.target.agent_update.update_available && (!item.target.online ? <small>Offline · update when reconnected</small> : item.target.agent_update.remote_update_supported !== true ? <small>Manual update required</small> : admin && <button className="button" aria-label={`Update ${item.device}`} disabled={updates.running(item.target)} onClick={() => void updates.start(item.target!)}>{updates.running(item.target) ? 'Updating…' : 'Update'}</button>)}
+          {item.target.identity_state === 'active' && item.target.agent_update.update_available && (!item.target.online && !updates.running(item.target) ? <small>Offline · update when reconnected</small> : item.target.agent_update.remote_update_supported !== true ? <small>Manual update required</small> : admin && <button className="button" aria-label={`Update ${item.device}`} disabled={updates.running(item.target)} onClick={() => void updates.start(item.target!)}>{updates.running(item.target) ? 'Updating…' : 'Update'}</button>)}
         </div>}
         {item.date && <time dateTime={item.date}>{time(item.date)}</time>}
       </div>) : <div className="dashboard-empty">Nothing needs attention.</div>}
