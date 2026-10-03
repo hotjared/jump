@@ -197,10 +197,12 @@ async def maintain_screen_lease(
         await asyncio.sleep(SCREEN_CONTROL_POLL_SECONDS)
         current = db.get(RemoteSession, session_id, populate_existing=True)
         db.commit()
-        if not current or current.state not in ("connecting", "active"):
+        if not current:
             return "session_timeout"
         if current.screen_close_requested_at:
             return "session_closed"
+        if current.state not in ("connecting", "active"):
+            return "session_timeout"
         stamp = time.monotonic()
         if liveness is not None and stamp - liveness["seen"] >= SCREEN_BROWSER_TIMEOUT_SECONDS:
             return "browser_disconnected"

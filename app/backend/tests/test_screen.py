@@ -684,7 +684,7 @@ def test_screen_explicit_clipboard_sas_and_desktops_preserve_history(client, db,
     device = seed(db, capabilities=["screen_control_v1", "screen_control_v2"])
     as_user(client, db)
     sid = create(client, device).json()["id"]
-    secret = "clipboard-only secret ?? ??"
+    secret = "clipboard-only secret 世界 😀"
     rid = str(uuid.uuid4())
 
     class Gateway:

@@ -161,7 +161,7 @@ function opRequest() { return opFrames().find(frame => frame.type === 'screen_op
 
 describe('explicit Screen actions', () => {
   it('round trips Unicode and empty text only on explicit requests', async () => {
-    const session = active(); const text = 'h�llo ?? ??'
+    const session = active(); const text = 'héllo 世界 😀'
     const readText = vi.fn().mockResolvedValue(text); const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText, writeText } })
     expect(readText).not.toHaveBeenCalled(); expect(writeText).not.toHaveBeenCalled()
@@ -231,7 +231,7 @@ describe('explicit Screen actions', () => {
     const session = active(); vi.spyOn(session, 'attach').mockReturnValue(() => {})
     const view = render(<SessionWorkspace sessions={[session]} activeId={session.id} select={() => {}} close={() => {}} />)
     for (const label of ['Paste to Remote', 'Copy from Remote', 'Ctrl+Alt+Del']) expect((screen.getByRole('button', { name: label }) as HTMLButtonElement).disabled).toBe(false)
-    fireEvent.click(screen.getByRole('button', { name: 'Control � switch to View Only' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Control · switch to View Only' }))
     for (const label of ['Paste to Remote', 'Copy from Remote', 'Ctrl+Alt+Del']) expect((screen.getByRole('button', { name: label }) as HTMLButtonElement).disabled).toBe(true)
     view.unmount(); session.disconnect()
   })
@@ -257,7 +257,7 @@ it('keeps v1 basic controls while hiding and suppressing v2 operations', async (
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText, writeText } })
   const view = render(<SessionWorkspace sessions={[session]} activeId={session.id} select={() => {}} close={() => {}} fileDevices={['device']} />)
   for (const label of ['Paste to Remote', 'Copy from Remote', 'Ctrl+Alt+Del']) expect(screen.queryByRole('button', { name: label })).toBeNull()
-  for (const label of ['Files', 'Control � switch to View Only', 'Fullscreen', 'Disconnect']) expect(screen.getByRole('button', { name: label })).toBeTruthy()
+  for (const label of ['Files', 'Control · switch to View Only', 'Fullscreen', 'Disconnect']) expect(screen.getByRole('button', { name: label })).toBeTruthy()
   expect(screen.getByText('Update the Windows Jump agent to enable unattended admin controls.')).toBeTruthy()
   expect(session.canControl).toBe(true); expect(session.hasRemoteClipboard).toBe(false)
   await session.sendSAS()

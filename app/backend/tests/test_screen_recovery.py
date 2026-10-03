@@ -4,13 +4,25 @@ import uuid
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 from test_api import ORIGIN, as_user, write_headers
 from test_rdp import seed
-from test_screen import client, confirmed_controller_release, create  # noqa: F401
+from test_screen import create
 
 from jump import screen
+from jump.db import get_db
+from jump.main import app
 from jump.models import AuditEvent, RemoteSession, Role
+
+
+@pytest.fixture
+def client(db, monkeypatch):
+    monkeypatch.setattr(screen, "release_screen_controller", lambda session: None)
+    app.dependency_overrides[get_db] = lambda: db
+    with TestClient(app, base_url=ORIGIN) as connection:
+        yield connection
+    app.dependency_overrides.clear()
 
 
 class IdleGateway:

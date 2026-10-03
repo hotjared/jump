@@ -270,7 +270,7 @@ func testPrivateScreenRouting(t *testing.T, supportsV2 bool, screenVersion int) 
 	if (<-events).Kind != "clipboard_set" {
 		t.Fatal("set request")
 	}
-	text := []byte(strings.Repeat("x", screenChunkBytes) + "??")
+	text := []byte(strings.Repeat("x", screenChunkBytes) + "世界")
 	for _, chunk := range clipboardChunks(id, text) {
 		chunk.Version = 1
 		chunk.SessionID = id
